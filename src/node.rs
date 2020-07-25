@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::mem;
+use std::ptr;
 
 type PrefixCount = u32;
 const MAX_PREFIX_STORED: usize = 10;
@@ -32,8 +33,64 @@ impl Node {
         return next.search(key, &(depth + 1));
     }
 
-    pub fn insert(&mut self, key: &[u8], value: u8) -> Result<(), ()> {
-        unimplemented!()
+    pub fn insert(node: *const Node, key: &[u8], value: u8, depth: &usize) -> Result<(), ()> {
+        unsafe {
+            let node_ref = node.as_ref().unwrap();
+            if node_ref.is_leaf() {
+                let mut new_inner_node = Self::make_node4(NodeType::Inner);
+                let new_leaf_node = Self::make_node4(NodeType::Leaf(key.to_owned()));
+                // set new inner node's prefix to intersection of two keys
+                let overlap = key.len().min(node_ref.load_key().unwrap().len());
+                for i in 0..overlap {
+                    new_inner_node.get_header_mut().prefix[i] = key[i + depth];
+                }
+                // todo: what if prefix_len > Max_stored_prefix?
+                // todo: need to adjust prefix for node and new_leaf_node?
+                new_inner_node.get_header_mut().prefix_len = overlap as u32;
+                new_inner_node.add_child(key[*depth], &new_leaf_node);
+                new_inner_node.add_child(node_ref.load_key().unwrap()[*depth], node);
+                // todo: atomic swap node and new_inner_node
+                // node and other pointers should be AtomicPtr
+                return Ok(());
+            }
+            let p = node_ref.check_prefix(key, depth);
+            if p != node_ref.get_prefix_len() {
+                // make a copy of node and do modification on it,
+                // construct new inner node and replace node
+                let mut node_substitute: Node = mem::transmute_copy(node_ref);
+                let mut new_inner_node = Self::make_node4(NodeType::Inner);
+                let new_leaf_node = Self::make_node4(NodeType::Leaf(key.to_owned()));
+                let node_prefix = node_ref.get_header().prefix;
+                new_inner_node.add_child(key[depth + *p as usize], &new_leaf_node);
+                new_inner_node.add_child(node_prefix[*p as usize], &node_substitute);
+                ptr::copy_nonoverlapping(
+                    &node_prefix,
+                    &mut new_inner_node.get_header_mut().prefix,
+                    mem::size_of::<[u8; MAX_PREFIX_STORED]>(),
+                );
+                node_substitute.get_header_mut().prefix_len -= p + 1;
+                ptr::copy(
+                    &node_substitute.get_header().prefix,
+                    &mut node_substitute.get_header_mut().prefix,
+                    *node_substitute.get_prefix_len() as usize,
+                );
+                // todo: atomic swap node and new_inner_node
+                return Ok(());
+            }
+
+            let depth = depth + *node_ref.get_prefix_len() as usize;
+            if let Some(next_node) = node_ref.find_child(&key[depth]) {
+                Self::insert(next_node, key, value, &(depth + 1))?;
+            } else {
+                if node_ref.is_full() {
+                    Self::grow(node);
+                }
+                let new_leaf_node = Self::make_node4(NodeType::Leaf(key.to_owned()));
+                node_ref.add_child(key[depth], &new_leaf_node);
+            }
+        }
+
+        todo!()
     }
 
     pub fn remove(&mut self, key: &[u8]) -> ! {
@@ -90,6 +147,37 @@ impl Node {
             Node::Node48(node) => &node.header,
             Node::Node256(node) => &node.header,
         }
+    }
+
+    fn get_header_mut(&mut self) -> &mut Header {
+        match self {
+            Node::Node4(node) => &mut node.header,
+            Node::Node16(node) => &mut node.header,
+            Node::Node48(node) => &mut node.header,
+            Node::Node256(node) => &mut node.header,
+        }
+    }
+
+    fn load_key(&self) -> Option<&[u8]> {
+        todo!()
+    }
+
+    fn add_child(&self, key: u8, child: *const Node) {
+        todo!()
+    }
+
+    fn is_full(&self) -> bool {
+        todo!()
+    }
+
+    fn grow(node: *const Node) {
+        todo!()
+    }
+}
+
+impl Node {
+    fn make_node4(node_type: NodeType) -> Self {
+        todo!()
     }
 }
 
