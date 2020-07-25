@@ -3,6 +3,8 @@ use std::mem;
 
 type PrefixCount = u32;
 const MAX_PREFIX_STORED: usize = 10;
+type K = usize;
+type V = usize;
 
 pub enum Node {
     Node4(Node4),
@@ -41,11 +43,15 @@ impl Node {
 
 impl Node {
     fn is_leaf(&self) -> bool {
-        todo!()
+        self.get_header().node_type != NodeType::Inner
     }
 
-    fn leaf_match(&self, key: &[u8], depth: &usize) -> bool {
-        todo!()
+    // fully check stored key
+    fn leaf_match(&self, key: &[u8], _depth: &usize) -> bool {
+        match &self.get_header().node_type {
+            NodeType::Leaf(stored_key) => stored_key.as_slice() == key,
+            NodeType::Inner => false,
+        }
     }
 
     fn check_prefix(&self, key: &[u8], depth: &usize) -> &PrefixCount {
@@ -87,12 +93,10 @@ impl Node {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum NodeType {
-    Node4,
-    Node16,
-    Node48,
-    Node256,
+    Inner,
+    Leaf(Vec<u8>),
 }
 
 struct Node4 {
@@ -102,9 +106,9 @@ struct Node4 {
 }
 
 impl Node4 {
-    pub fn new() -> Self {
+    pub fn new(node_type: NodeType) -> Self {
         Self {
-            header: Header::new(NodeType::Node4),
+            header: Header::new(node_type),
             key: [0; 4],
             child: [&0; 4],
         }
@@ -119,12 +123,6 @@ impl Node4 {
             }
         }
         None
-    }
-
-    fn leaf_match(&self, key: &[u8], depth: &usize) -> bool {
-        let key_len = key.len();
-        // get entire key from leaf node and compare;
-        todo!()
     }
 }
 
@@ -163,7 +161,7 @@ impl Node4 {
 
         // overflow
         if self.header.count == 4 {
-            let mut new_node = mem::ManuallyDrop::new(Box::new(Node16::new()));
+            let mut new_node = mem::ManuallyDrop::new(Box::new(Node16::new(NodeType::Inner)));
             (*new_node).header = self.header.clone();
             (*new_node).header.count += 1;
             for i in 0..self.header.count as usize {
@@ -209,9 +207,9 @@ struct Node16 {
 }
 
 impl Node16 {
-    pub fn new() -> Self {
+    pub fn new(node_type: NodeType) -> Self {
         Self {
-            header: Header::new(NodeType::Node16),
+            header: Header::new(node_type),
             key: [0; 16],
             child: [&0; 16],
         }
@@ -238,9 +236,9 @@ struct Node48 {
 }
 
 impl Node48 {
-    pub fn new() -> Self {
+    pub fn new(node_type: NodeType) -> Self {
         Self {
-            header: Header::new(NodeType::Node48),
+            header: Header::new(node_type),
             key: [-1; 256],
             child: [&0; 48],
         }
@@ -266,9 +264,9 @@ struct Node256 {
 }
 
 impl Node256 {
-    pub fn new() -> Self {
+    pub fn new(node_type: NodeType) -> Self {
         Self {
-            header: Header::new(NodeType::Node256),
+            header: Header::new(node_type),
             child: [&0; 256],
         }
     }
