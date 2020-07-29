@@ -88,9 +88,8 @@ impl Node {
                 let new_leaf_node = Self::make_node4(NodeType::Leaf(key.to_owned()));
                 node_ref.add_child(key[depth], &new_leaf_node);
             }
+            return Ok(());
         }
-
-        todo!()
     }
 
     pub fn remove(&mut self, key: &[u8]) -> ! {
@@ -126,7 +125,6 @@ impl Node {
         &header.prefix_len
     }
 
-    // todo: return bool instead?
     fn get_prefix_len(&self) -> &PrefixCount {
         &self.get_header().prefix_len
     }
@@ -159,25 +157,48 @@ impl Node {
     }
 
     fn load_key(&self) -> Option<&[u8]> {
-        todo!()
+        match &self.get_header().node_type {
+            NodeType::Inner => None,
+            NodeType::Leaf(key) => Some(&key),
+        }
     }
 
+    // todo: SIMD
+    // todo: order-preserving
     fn add_child(&self, key: u8, child: *const Node) {
         todo!()
     }
 
     fn is_full(&self) -> bool {
-        todo!()
+        self.get_header().count
+            > match self {
+                Node::Node4(_) => 3,
+                Node::Node16(_) => 15,
+                Node::Node48(_) => 47,
+                // Node 256 won't full
+                Node::Node256(_) => 255,
+            }
     }
 
+    // create a new larger node, copy header, child (and key)
+    // to it and atomic replace old node
     fn grow(node: *const Node) {
-        todo!()
+        let grown = unsafe {
+            match &*node {
+                Node::Node4(node) => Node4::grow(&node),
+                Node::Node16(node) => Node16::grow(&node),
+                Node::Node48(node) => Node48::grow(&node),
+                Node::Node256(_) => unreachable!("Node256 cannot grow"),
+            }
+        };
+
+        // todo: atomic swap node with grown node
     }
 }
 
 impl Node {
     fn make_node4(node_type: NodeType) -> Self {
-        todo!()
+        Self::Node4(Node4::new(node_type))
     }
 }
 
@@ -202,7 +223,7 @@ impl Node4 {
         }
     }
 
-    fn find_child(&self, key: &u8) -> Option<&Node> {
+    pub fn find_child(&self, key: &u8) -> Option<&Node> {
         for i in 0..self.header.count as usize {
             if &self.key[i] == key {
                 unsafe {
@@ -211,6 +232,23 @@ impl Node4 {
             }
         }
         None
+    }
+
+    pub fn grow(node: &Node4) -> *const Node {
+        let mut new_node = Node16::new(NodeType::Inner);
+
+        // copy header
+        unsafe {
+            ptr::copy_nonoverlapping(&node.header, &mut new_node.header, mem::size_of::<Header>());
+        }
+
+        // key & child field
+        for i in 0..4 {
+            new_node.key[i] = node.key[i];
+            new_node.child[i] = node.child[i];
+        }
+
+        &Node::Node16(new_node) as *const Node
     }
 }
 
@@ -314,6 +352,23 @@ impl Node16 {
         }
         None
     }
+
+    pub fn grow(node: &Node16) -> *const Node {
+        let mut new_node = Node48::new(NodeType::Inner);
+
+        // copy header
+        unsafe {
+            ptr::copy_nonoverlapping(&node.header, &mut new_node.header, mem::size_of::<Header>());
+        }
+
+        // key & child field
+        for i in 0..16 {
+            new_node.child[i] = node.child[i];
+            new_node.key[node.key[i] as usize] = i as i8;
+        }
+
+        &Node::Node48(new_node) as *const Node
+    }
 }
 
 struct Node48 {
@@ -343,6 +398,24 @@ impl Node48 {
             }
         }
         None
+    }
+
+    pub fn grow(node: &Node48) -> *const Node {
+        let mut new_node = Node256::new(NodeType::Inner);
+
+        // copy header
+        unsafe {
+            ptr::copy_nonoverlapping(&node.header, &mut new_node.header, mem::size_of::<Header>());
+        }
+
+        // child field
+        for i in 0..=255 {
+            if node.key[i] >= 0 {
+                new_node.child[i] = node.child[node.key[i] as usize];
+            }
+        }
+
+        &Node::Node256(new_node) as *const Node
     }
 }
 
