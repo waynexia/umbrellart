@@ -41,8 +41,8 @@ impl Node {
         unsafe {
             let node_ref = &*(node.load(Relaxed) as *mut Node);
             if node_ref.is_leaf() {
-                let mut new_inner_node = Self::make_node4(NodeType::Inner);
-                let new_leaf_node = Self::make_node4(NodeType::Leaf(key.to_owned()));
+                let mut new_inner_node = Self::make_node4();
+                let new_leaf_node = Self::make_node4();
                 // set new inner node's prefix to intersection of two keys
                 let overlap = key.len().min(node_ref.load_key().unwrap().len());
                 for i in 0..overlap {
@@ -52,7 +52,10 @@ impl Node {
                 // todo: need to adjust prefix for node and new_leaf_node?
                 new_inner_node.get_header_mut().prefix_len = overlap as u32;
                 new_inner_node.add_child(key[*depth], &new_leaf_node);
-                new_inner_node.add_child(node_ref.load_key().unwrap()[*depth], node);
+                new_inner_node.add_child(
+                    node_ref.load_key().unwrap()[*depth],
+                    node.load(Relaxed) as *const Node,
+                );
                 // todo: atomic swap node and new_inner_node
                 // node and other pointers should be AtomicPtr
                 return Ok(());
@@ -62,8 +65,8 @@ impl Node {
                 // make a copy of node and modify it,
                 // construct new inner node and replace node
                 let mut node_substitute: Node = mem::transmute_copy(node_ref);
-                let mut new_inner_node = Self::make_node4(NodeType::Inner);
-                let new_leaf_node = Self::make_node4(NodeType::Leaf(key.to_owned()));
+                let mut new_inner_node = Self::make_node4();
+                let new_leaf_node = Self::make_node4();
                 let node_prefix = node_ref.get_header().prefix;
                 new_inner_node.add_child(key[depth + *p as usize], &new_leaf_node);
                 new_inner_node.add_child(node_prefix[*p as usize], &node_substitute);
@@ -87,9 +90,9 @@ impl Node {
                 Self::insert(*next_node, key, value, &(depth + 1))?;
             } else {
                 if node_ref.is_full() {
-                    Self::grow(node);
+                    Self::grow(&node);
                 }
-                let new_leaf_node = Self::make_node4(NodeType::Leaf(key.to_owned()));
+                let new_leaf_node = Self::make_node4();
                 node_ref.add_child(key[depth], &new_leaf_node);
             }
             return Ok(());
@@ -103,15 +106,17 @@ impl Node {
 
 impl Node {
     fn is_leaf(&self) -> bool {
-        self.get_header().node_type != NodeType::Inner
+        // self.get_header().node_type != NodeType::Inner
+        todo!()
     }
 
     // fully check stored key
     fn leaf_match(&self, key: &[u8], _depth: &usize) -> bool {
-        match &self.get_header().node_type {
-            NodeType::Leaf(stored_key) => stored_key.as_slice() == key,
-            NodeType::Inner => false,
-        }
+        // match &self.get_header().node_type {
+        //     NodeType::Leaf(stored_key) => stored_key.as_slice() == key,
+        //     NodeType::Inner => false,
+        // }
+        todo!()
     }
 
     fn check_prefix(&self, key: &[u8], depth: &usize) -> &PrefixCount {
@@ -161,10 +166,11 @@ impl Node {
     }
 
     fn load_key(&self) -> Option<&[u8]> {
-        match &self.get_header().node_type {
-            NodeType::Inner => None,
-            NodeType::Leaf(key) => Some(&key),
-        }
+        // match &self.get_header().node_type {
+        //     NodeType::Inner => None,
+        //     NodeType::Leaf(key) => Some(&key),
+        // }
+        todo!()
     }
 
     // todo: SIMD
@@ -188,21 +194,21 @@ impl Node {
     // to it and atomic replace old node
     fn grow(node: &AtomicPtr<usize>) {
         let grown = unsafe {
-            match &*node {
-                Node::Node4(node) => Node4::grow(&node),
-                Node::Node16(node) => Node16::grow(&node),
-                Node::Node48(node) => Node48::grow(&node),
-                Node::Node256(_) => unreachable!("Node256 cannot grow"),
+            match (*(node.load(Relaxed) as *const Header)).node_type {
+                NodeType::Node4 => Node4::grow(&node),
+                NodeType::Node16 => Node16::grow(&node),
+                NodeType::Node48 => Node48::grow(&node),
+                NodeType::Node256 => unreachable!("Node256 cannot grow"),
             }
         };
 
-        // todo: atomic swap node with grown node
+        node.store(grown as *mut usize, Relaxed);
     }
 }
 
 impl Node {
-    fn make_node4(node_type: NodeType) -> Self {
-        Self::Node4(Node4::new(node_type))
+    fn make_node4() -> Self {
+        Self::Node4(Node4::new())
     }
 }
 
@@ -219,6 +225,7 @@ pub struct KVPair<K, V> {
     pub value: V,
 }
 
+#[repr(C)]
 struct Node4 {
     header: Header,
     key: [AtomicU8; 4],
@@ -226,7 +233,7 @@ struct Node4 {
 }
 
 impl Node4 {
-    pub fn new(node_type: NodeType) -> Self {
+    pub fn new() -> Self {
         let (key, child) = {
             let mut key: [MaybeUninit<AtomicU8>; 4] =
                 unsafe { MaybeUninit::uninit().assume_init() };
@@ -241,7 +248,7 @@ impl Node4 {
             unsafe { (mem::transmute(key), mem::transmute(child)) }
         };
         Self {
-            header: Header::new(node_type),
+            header: Header::new(NodeType::Node4),
             key,
             child,
         }
@@ -258,18 +265,23 @@ impl Node4 {
         None
     }
 
-    pub fn grow(node: &Node4) -> *const Node {
-        let mut new_node = Node16::new(NodeType::Inner);
+    pub fn grow(node: &AtomicPtr<usize>) -> *const Node {
+        let mut new_node = Node16::new();
+        let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node4) };
 
         // copy header
         unsafe {
-            ptr::copy_nonoverlapping(&node.header, &mut new_node.header, mem::size_of::<Header>());
+            ptr::copy_nonoverlapping(
+                &fulled_node.header,
+                &mut new_node.header,
+                mem::size_of::<Header>(),
+            );
         }
 
         // key & child field
         for i in 0..4 {
-            new_node.key[i].store(node.key[i].load(Relaxed), Relaxed);
-            new_node.child[i].store(node.child[i].load(Relaxed), Relaxed);
+            new_node.key[i].store(fulled_node.key[i].load(Relaxed), Relaxed);
+            new_node.child[i].store(fulled_node.child[i].load(Relaxed), Relaxed);
         }
 
         &Node::Node16(new_node) as *const Node
@@ -281,6 +293,7 @@ impl Node4 {
     }
 }
 
+#[repr(C)]
 struct Node16 {
     header: Header,
     key: [AtomicU8; 16],
@@ -288,7 +301,7 @@ struct Node16 {
 }
 
 impl Node16 {
-    pub fn new(node_type: NodeType) -> Self {
+    pub fn new() -> Self {
         let (key, child) = {
             let mut key: [MaybeUninit<AtomicU8>; 16] =
                 unsafe { MaybeUninit::uninit().assume_init() };
@@ -303,7 +316,7 @@ impl Node16 {
             unsafe { (mem::transmute(key), mem::transmute(child)) }
         };
         Self {
-            header: Header::new(node_type),
+            header: Header::new(NodeType::Node16),
             key,
             child,
         }
@@ -321,24 +334,30 @@ impl Node16 {
         None
     }
 
-    pub fn grow(node: &Node16) -> *const Node {
-        let mut new_node = Node48::new(NodeType::Inner);
+    pub fn grow(node: &AtomicPtr<usize>) -> *const Node {
+        let mut new_node = Node48::new();
+        let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node4) };
 
         // copy header
         unsafe {
-            ptr::copy_nonoverlapping(&node.header, &mut new_node.header, mem::size_of::<Header>());
+            ptr::copy_nonoverlapping(
+                &fulled_node.header,
+                &mut new_node.header,
+                mem::size_of::<Header>(),
+            );
         }
 
         // key & child field
         for i in 0..16 {
-            new_node.child[i].store(node.child[i].load(Relaxed), Relaxed);
-            new_node.key[node.key[i].load(Relaxed) as usize].store(i as i8, Relaxed);
+            new_node.child[i].store(fulled_node.child[i].load(Relaxed), Relaxed);
+            new_node.key[fulled_node.key[i].load(Relaxed) as usize].store(i as i8, Relaxed);
         }
 
         &Node::Node48(new_node) as *const Node
     }
 }
 
+#[repr(C)]
 struct Node48 {
     header: Header,
     // Stores child index, negative means not exist
@@ -347,7 +366,7 @@ struct Node48 {
 }
 
 impl Node48 {
-    pub fn new(node_type: NodeType) -> Self {
+    pub fn new() -> Self {
         let (key, child) = {
             let mut key: [MaybeUninit<AtomicI8>; 256] =
                 unsafe { MaybeUninit::uninit().assume_init() };
@@ -365,7 +384,7 @@ impl Node48 {
             unsafe { (mem::transmute(key), mem::transmute(child)) }
         };
         Self {
-            header: Header::new(node_type),
+            header: Header::new(NodeType::Node48),
             key,
             child,
         }
@@ -386,19 +405,24 @@ impl Node48 {
         None
     }
 
-    pub fn grow(node: &Node48) -> *const Node {
-        let mut new_node = Node256::new(NodeType::Inner);
+    pub fn grow(node: &AtomicPtr<usize>) -> *const Node {
+        let mut new_node = Node256::new();
+        let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node4) };
 
         // copy header
         unsafe {
-            ptr::copy_nonoverlapping(&node.header, &mut new_node.header, mem::size_of::<Header>());
+            ptr::copy_nonoverlapping(
+                &fulled_node.header,
+                &mut new_node.header,
+                mem::size_of::<Header>(),
+            );
         }
 
         // child field
         for i in 0..=255 {
-            if node.key[i].load(Relaxed) >= 0 {
+            if fulled_node.key[i].load(Relaxed) >= 0 {
                 new_node.child[i].store(
-                    node.child[node.key[i].load(Relaxed) as usize].load(Relaxed),
+                    fulled_node.child[fulled_node.key[i].load(Relaxed) as usize].load(Relaxed),
                     Relaxed,
                 );
             }
@@ -408,13 +432,14 @@ impl Node48 {
     }
 }
 
+#[repr(C)]
 struct Node256 {
     header: Header,
     child: [AtomicPtr<usize>; 256],
 }
 
 impl Node256 {
-    pub fn new(node_type: NodeType) -> Self {
+    pub fn new() -> Self {
         let child = {
             let mut child: [MaybeUninit<AtomicPtr<usize>>; 256] =
                 unsafe { MaybeUninit::uninit().assume_init() };
@@ -426,7 +451,7 @@ impl Node256 {
             unsafe { mem::transmute(child) }
         };
         Self {
-            header: Header::new(node_type),
+            header: Header::new(NodeType::Node256),
             child,
         }
     }
@@ -447,6 +472,7 @@ impl Node256 {
 }
 
 #[derive(Clone)]
+#[repr(C)]
 struct Header {
     node_type: NodeType,
     // item count
