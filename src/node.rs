@@ -1,6 +1,10 @@
+#[allow(unused_variables)]
 use std::cmp::Ordering;
-use std::mem;
+use std::mem::{self, MaybeUninit};
 use std::ptr;
+use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+use std::sync::atomic::{AtomicI8, AtomicPtr, AtomicU8};
+use std::sync::Arc;
 
 type PrefixCount = u32;
 const MAX_PREFIX_STORED: usize = 10;
@@ -33,9 +37,9 @@ impl Node {
         return next.search(key, &(depth + 1));
     }
 
-    pub fn insert(node: *const Node, key: &[u8], value: u8, depth: &usize) -> Result<(), ()> {
+    pub fn insert(node: AtomicPtr<usize>, key: &[u8], value: u8, depth: &usize) -> Result<(), ()> {
         unsafe {
-            let node_ref = node.as_ref().unwrap();
+            let node_ref = &*(node.load(Relaxed) as *mut Node);
             if node_ref.is_leaf() {
                 let mut new_inner_node = Self::make_node4(NodeType::Inner);
                 let new_leaf_node = Self::make_node4(NodeType::Leaf(key.to_owned()));
@@ -55,7 +59,7 @@ impl Node {
             }
             let p = node_ref.check_prefix(key, depth);
             if p != node_ref.get_prefix_len() {
-                // make a copy of node and do modification on it,
+                // make a copy of node and modify it,
                 // construct new inner node and replace node
                 let mut node_substitute: Node = mem::transmute_copy(node_ref);
                 let mut new_inner_node = Self::make_node4(NodeType::Inner);
@@ -80,7 +84,7 @@ impl Node {
 
             let depth = depth + *node_ref.get_prefix_len() as usize;
             if let Some(next_node) = node_ref.find_child(&key[depth]) {
-                Self::insert(next_node, key, value, &(depth + 1))?;
+                Self::insert(*next_node, key, value, &(depth + 1))?;
             } else {
                 if node_ref.is_full() {
                     Self::grow(node);
@@ -129,7 +133,7 @@ impl Node {
         &self.get_header().prefix_len
     }
 
-    fn find_child(&self, key_byte: &u8) -> Option<&Self> {
+    fn find_child(&self, key_byte: &u8) -> Option<&AtomicPtr<usize>> {
         match self {
             Node::Node4(node) => node.find_child(key_byte),
             Node::Node16(node) => node.find_child(key_byte),
@@ -182,7 +186,7 @@ impl Node {
 
     // create a new larger node, copy header, child (and key)
     // to it and atomic replace old node
-    fn grow(node: *const Node) {
+    fn grow(node: &AtomicPtr<usize>) {
         let grown = unsafe {
             match &*node {
                 Node::Node4(node) => Node4::grow(&node),
@@ -204,30 +208,50 @@ impl Node {
 
 #[derive(Clone, PartialEq)]
 pub enum NodeType {
-    Inner,
-    Leaf(Vec<u8>),
+    Node4,
+    Node16,
+    Node48,
+    Node256,
+}
+
+pub struct KVPair<K, V> {
+    pub key: K,
+    pub value: V,
 }
 
 struct Node4 {
     header: Header,
-    key: [u8; 4],
-    child: [*const usize; 4],
+    key: [AtomicU8; 4],
+    child: [AtomicPtr<usize>; 4],
 }
 
 impl Node4 {
     pub fn new(node_type: NodeType) -> Self {
+        let (key, child) = {
+            let mut key: [MaybeUninit<AtomicU8>; 4] =
+                unsafe { MaybeUninit::uninit().assume_init() };
+            let mut child: [MaybeUninit<AtomicPtr<usize>>; 4] =
+                unsafe { MaybeUninit::uninit().assume_init() };
+
+            for i in 0..4 {
+                key[i] = MaybeUninit::new(AtomicU8::default());
+                child[i] = MaybeUninit::new(AtomicPtr::default());
+            }
+
+            unsafe { (mem::transmute(key), mem::transmute(child)) }
+        };
         Self {
             header: Header::new(node_type),
-            key: [0; 4],
-            child: [&0; 4],
+            key,
+            child,
         }
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<&Node> {
+    pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
         for i in 0..self.header.count as usize {
-            if &self.key[i] == key {
+            if &self.key[i].load(Relaxed) == key {
                 unsafe {
-                    return Some((self.child[i] as *const Node).as_ref().unwrap());
+                    return Some(&self.child[i]);
                 }
             }
         }
@@ -244,109 +268,53 @@ impl Node4 {
 
         // key & child field
         for i in 0..4 {
-            new_node.key[i] = node.key[i];
-            new_node.child[i] = node.child[i];
+            new_node.key[i].store(node.key[i].load(Relaxed), Relaxed);
+            new_node.child[i].store(node.child[i].load(Relaxed), Relaxed);
         }
 
         &Node::Node16(new_node) as *const Node
     }
-}
 
-impl Node4 {
-    fn find(&self, key: &[u8]) -> Option<*const Node> {
-        match key.len().cmp(&(self.header.prefix_len as usize)) {
-            Ordering::Less | Ordering::Equal => {
-                return None;
-            }
-            Ordering::Greater => {
-                for i in 0..self.header.prefix_len as usize {
-                    if key[i] != self.header.prefix[i] {
-                        return None;
-                    }
-                }
-                // find in keys
-                let key_byte = key[self.header.prefix_len as usize];
-                for i in 0..self.header.count as usize {
-                    if key_byte == self.key[i] {
-                        return Some(self.child[i] as *const Node);
-                    }
-                }
-                return None;
-            }
-        }
-    }
-
-    fn insert(
-        &mut self,
-        key: &[u8],
-        value: *const usize,
-        parent: *mut usize,
-        parent_index: &usize,
-    ) -> Result<(), ()> {
-        // ignore collapsing
-
-        // overflow
-        if self.header.count == 4 {
-            let mut new_node = mem::ManuallyDrop::new(Box::new(Node16::new(NodeType::Inner)));
-            (*new_node).header = self.header.clone();
-            (*new_node).header.count += 1;
-            for i in 0..self.header.count as usize {
-                (*new_node).key[i] = self.key[i];
-                (*new_node).child[i] = self.child[i];
-            }
-            // todo: find propriate place (index)
-            let new_index = 0;
-            (*new_node).key[new_index] = key[0];
-            (*new_node).child[new_index] = value;
-
-            unsafe {
-                (*(parent as *mut Node4)).child[*parent_index] =
-                    Box::into_raw(mem::ManuallyDrop::into_inner(new_node)) as *const usize;
-            }
-        } else {
-            // todo: find propriate place (index)
-            let new_index = 0;
-            self.key[new_index] = key[0];
-        }
-
-        Ok(())
-    }
-
-    fn delete(&mut self, key: &[u8]) -> Result<(), ()> {
-        // ignore collapsing
-
-        // todo find propriate place (index)
-        let delete_index = 0;
-        self.key
-            .copy_within(delete_index..self.header.count as usize, delete_index);
-        self.child
-            .copy_within(delete_index..self.header.count as usize, delete_index);
-
-        Ok(())
+    pub fn add_child(&self, key: u8, child: *const Node) {
+        self.key[self.header.count as usize].store(key, Relaxed);
+        self.child[self.header.count as usize].store(child as *mut usize, Relaxed);
     }
 }
 
 struct Node16 {
     header: Header,
-    key: [u8; 16],
-    child: [*const usize; 16],
+    key: [AtomicU8; 16],
+    child: [AtomicPtr<usize>; 16],
 }
 
 impl Node16 {
     pub fn new(node_type: NodeType) -> Self {
+        let (key, child) = {
+            let mut key: [MaybeUninit<AtomicU8>; 16] =
+                unsafe { MaybeUninit::uninit().assume_init() };
+            let mut child: [MaybeUninit<AtomicPtr<usize>>; 16] =
+                unsafe { MaybeUninit::uninit().assume_init() };
+
+            for i in 0..16 {
+                key[i] = MaybeUninit::new(AtomicU8::default());
+                child[i] = MaybeUninit::new(AtomicPtr::default());
+            }
+
+            unsafe { (mem::transmute(key), mem::transmute(child)) }
+        };
         Self {
             header: Header::new(node_type),
-            key: [0; 16],
-            child: [&0; 16],
+            key,
+            child,
         }
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<&Node> {
+    pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
         // todo: use SIMD or binary search
         for i in 0..self.header.count as usize {
-            if &self.key[i] == key {
+            if &self.key[i].load(Relaxed) == key {
                 unsafe {
-                    return Some((self.child[i] as *const Node).as_ref().unwrap());
+                    return Some(&self.child[i]);
                 }
             }
         }
@@ -363,8 +331,8 @@ impl Node16 {
 
         // key & child field
         for i in 0..16 {
-            new_node.child[i] = node.child[i];
-            new_node.key[node.key[i] as usize] = i as i8;
+            new_node.child[i].store(node.child[i].load(Relaxed), Relaxed);
+            new_node.key[node.key[i].load(Relaxed) as usize].store(i as i8, Relaxed);
         }
 
         &Node::Node48(new_node) as *const Node
@@ -374,26 +342,44 @@ impl Node16 {
 struct Node48 {
     header: Header,
     // Stores child index, negative means not exist
-    key: [i8; 256],
-    child: [*const usize; 48],
+    key: [AtomicI8; 256],
+    child: [AtomicPtr<usize>; 48],
 }
 
 impl Node48 {
     pub fn new(node_type: NodeType) -> Self {
+        let (key, child) = {
+            let mut key: [MaybeUninit<AtomicI8>; 256] =
+                unsafe { MaybeUninit::uninit().assume_init() };
+            let mut child: [MaybeUninit<AtomicPtr<usize>>; 48] =
+                unsafe { MaybeUninit::uninit().assume_init() };
+
+            for i in 0..48 {
+                key[i] = MaybeUninit::new(AtomicI8::default());
+                child[i] = MaybeUninit::new(AtomicPtr::default());
+            }
+            for i in 48..256 {
+                key[i] = MaybeUninit::new(AtomicI8::default());
+            }
+
+            unsafe { (mem::transmute(key), mem::transmute(child)) }
+        };
         Self {
             header: Header::new(node_type),
-            key: [-1; 256],
-            child: [&0; 48],
+            key,
+            child,
         }
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<&Node> {
-        if self.key[*key as usize] >= 0 {
+    pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
+        if self.key[*key as usize].load(Relaxed) >= 0 {
             unsafe {
                 return Some(
-                    (self.child[self.key[*key as usize] as usize] as *const Node)
-                        .as_ref()
-                        .unwrap(),
+                    // (self.child[self.key[*key as usize].load(Relaxed) as usize].load(Relaxed)
+                    //     as *const Node)
+                    //     .as_ref()
+                    //     .unwrap(),
+                    &self.child[self.key[*key as usize].load(Relaxed) as usize],
                 );
             }
         }
@@ -410,8 +396,11 @@ impl Node48 {
 
         // child field
         for i in 0..=255 {
-            if node.key[i] >= 0 {
-                new_node.child[i] = node.child[node.key[i] as usize];
+            if node.key[i].load(Relaxed) >= 0 {
+                new_node.child[i].store(
+                    node.child[node.key[i].load(Relaxed) as usize].load(Relaxed),
+                    Relaxed,
+                );
             }
         }
 
@@ -421,21 +410,36 @@ impl Node48 {
 
 struct Node256 {
     header: Header,
-    child: [*const usize; 256],
+    child: [AtomicPtr<usize>; 256],
 }
 
 impl Node256 {
     pub fn new(node_type: NodeType) -> Self {
+        let child = {
+            let mut child: [MaybeUninit<AtomicPtr<usize>>; 256] =
+                unsafe { MaybeUninit::uninit().assume_init() };
+
+            for i in 0..256 {
+                child[i] = MaybeUninit::new(AtomicPtr::default());
+            }
+
+            unsafe { mem::transmute(child) }
+        };
         Self {
             header: Header::new(node_type),
-            child: [&0; 256],
+            child,
         }
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<&Node> {
-        if !self.child[*key as usize].is_null() {
+    pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
+        if !self.child[*key as usize].load(Relaxed).is_null() {
             unsafe {
-                return Some((self.child[*key as usize] as *const Node).as_ref().unwrap());
+                return Some(
+                    // (self.child[*key as usize].load(Relaxed) as *const Node)
+                    //     .as_ref()
+                    //     .unwrap(),
+                    &self.child[*key as usize],
+                );
             }
         }
         None
