@@ -55,7 +55,7 @@ impl Node {
         // another lazy expansion?
         if Node::is_kvpair(next) {
             if Node::is_leaf_match(next, key) {
-                return Some((node.load(Relaxed) as usize - 1) as *mut usize);
+                return Some((next.load(Relaxed) as usize - 1) as *mut usize);
             }
             return None;
         }
@@ -76,7 +76,6 @@ impl Node {
         // assert!(!Self::is_kvpair(node));
         unsafe {
             let header = &*(node.load(Relaxed) as *mut Header);
-            // Fig.: 1
             // reached a kvpair node. should insert a inner node, move kvpair to `leaf` and add 1 child.
             // this happens when old key is substring of new key.
             if Self::is_kvpair(node) {
@@ -426,11 +425,18 @@ impl Node4 {
 
         // copy header
         unsafe {
-            ptr::copy_nonoverlapping(
-                &fulled_node.header,
-                &mut (*new_node).header,
-                mem::size_of::<Header>(),
-            );
+            // ptr::copy_nonoverlapping(
+            //     &fulled_node.header,
+            //     &mut (*new_node).header,
+            //     mem::size_of::<Header>(),
+            // );
+            // todo: make a function
+            let mut dst_header = &mut (*new_node).header;
+            dst_header.count = 4;
+            dst_header.prefix_len = fulled_node.header.prefix_len;
+            for i in 0..MAX_PREFIX_STORED.min(fulled_node.header.prefix_len as usize) {
+                dst_header.prefix[i] = fulled_node.header.prefix[i];
+            }
 
             // key & child field
             for i in 0..4 {
@@ -494,15 +500,22 @@ impl Node16 {
 
     pub fn grow(node: &AtomicPtr<usize>) -> *mut usize {
         let mut new_node = Box::into_raw(Box::new(Node48::new()));
-        let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node4) };
+        let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node16) };
 
         // copy header
         unsafe {
-            ptr::copy_nonoverlapping(
-                &fulled_node.header,
-                &mut (*new_node).header,
-                mem::size_of::<Header>(),
-            );
+            // ptr::copy_nonoverlapping(
+            //     &fulled_node.header,
+            //     &mut (*new_node).header,
+            //     mem::size_of::<Header>(),
+            // );
+            // todo: make a function
+            let mut dst_header = &mut (*new_node).header;
+            dst_header.count = 16;
+            dst_header.prefix_len = fulled_node.header.prefix_len;
+            for i in 0..MAX_PREFIX_STORED.min(fulled_node.header.prefix_len as usize) {
+                dst_header.prefix[i] = fulled_node.header.prefix[i];
+            }
 
             // key & child field
             for i in 0..16 {
@@ -514,9 +527,10 @@ impl Node16 {
         new_node as *mut usize
     }
 
-    pub fn add_child(&self, key: u8, child: *const usize) {
+    pub fn add_child(&mut self, key: u8, child: *const usize) {
         self.key[self.header.count as usize].store(key, Relaxed);
         self.child[self.header.count as usize].store(child as *mut usize, Relaxed);
+        self.header.count += 1;
     }
 }
 
@@ -538,11 +552,11 @@ impl Node48 {
                 unsafe { MaybeUninit::uninit().assume_init() };
 
             for i in 0..48 {
-                key[i] = MaybeUninit::new(AtomicI8::default());
+                key[i] = MaybeUninit::new(AtomicI8::new(-1));
                 child[i] = MaybeUninit::new(AtomicPtr::default());
             }
             for i in 48..256 {
-                key[i] = MaybeUninit::new(AtomicI8::default());
+                key[i] = MaybeUninit::new(AtomicI8::new(-1));
             }
 
             unsafe { (mem::transmute(key), mem::transmute(child)) }
@@ -572,15 +586,22 @@ impl Node48 {
 
     pub fn grow(node: &AtomicPtr<usize>) -> *mut usize {
         let mut new_node = Box::into_raw(Box::new(Node256::new()));
-        let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node4) };
+        let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node48) };
 
         // copy header
         unsafe {
-            ptr::copy_nonoverlapping(
-                &fulled_node.header,
-                &mut (*new_node).header,
-                mem::size_of::<Header>(),
-            );
+            // ptr::copy_nonoverlapping(
+            //     &fulled_node.header,
+            //     &mut (*new_node).header,
+            //     mem::size_of::<Header>(),
+            // );
+            // todo: make a function
+            let mut dst_header = &mut (*new_node).header;
+            dst_header.count = 48;
+            dst_header.prefix_len = fulled_node.header.prefix_len;
+            for i in 0..MAX_PREFIX_STORED.min(fulled_node.header.prefix_len as usize) {
+                dst_header.prefix[i] = fulled_node.header.prefix[i];
+            }
 
             // child field
             for i in 0..=255 {
@@ -596,8 +617,10 @@ impl Node48 {
         new_node as *mut usize
     }
 
-    pub fn add_child(&self, key: u8, child: *const usize) {
-        todo!()
+    pub fn add_child(&mut self, key: u8, child: *const usize) {
+        self.child[self.header.count as usize].store(child as *mut usize, Relaxed);
+        self.key[key as usize].store(self.header.count as i8, Relaxed);
+        self.header.count += 1;
     }
 }
 
@@ -640,7 +663,7 @@ impl Node256 {
     }
 
     pub fn add_child(&self, key: u8, child: *const usize) {
-        todo!()
+        self.child[key as usize].store(child as *mut usize, Relaxed);
     }
 }
 
@@ -708,7 +731,7 @@ mod test {
     }
 
     fn debug_print_atomic(node: &AtomicPtr<usize>) {
-        debug_print(node.load(Relaxed));
+        // debug_print(node.load(Relaxed));
     }
 
     #[ignore]
@@ -742,6 +765,34 @@ mod test {
 
         for kv in kvs {
             let result = Node::search(&root, &kv, 0);
+            println!("search {:?}, got result: {:?}", kv, result.unwrap())
+        }
+    }
+
+    #[test]
+    fn test_insert_grow() {
+        let root = AtomicPtr::new(empty_node4() as *mut usize);
+        Node::init(&root, &[1, 1, 1, 0], &[1, 1, 1, 0]);
+
+        let mut kvs = [[1, 1, 1, 1]; 255];
+        for i in 1..=255 {
+            kvs[i - 1][3] = i as u8;
+        }
+
+        for kv in &kvs {
+            println!("root addr: {:?}", root.load(Relaxed));
+            debug_print_atomic(&root);
+            let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
+            let kvpair_ptr = (Box::into_raw(Box::new(kvpair)) as usize + 1) as *mut KVPair;
+            println!("{:?} addr is {:?}", kv, kvpair_ptr);
+            Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
+            println!();
+        }
+
+        println!("insert finished");
+
+        for kv in &kvs {
+            let result = Node::search(&root, kv, 0);
             println!("search {:?}, got result: {:?}", kv, result.unwrap())
         }
     }
