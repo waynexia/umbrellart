@@ -73,9 +73,7 @@ impl Node {
             node.store(leaf as *mut usize, Relaxed);
             return Ok(());
         }
-        // assert!(!Self::is_kvpair(node));
         unsafe {
-            let header = &*(node.load(Relaxed) as *mut Header);
             // reached a kvpair node. should insert a inner node, move kvpair to `leaf` and add 1 child.
             // this happens when old key is substring of new key.
             if Self::is_kvpair(node) {
@@ -121,7 +119,7 @@ impl Node {
             //     return Ok(());
             // }
             let p = Self::check_prefix(node, key, depth);
-            println!("got prefix length {} with key {:?}", p, key);
+            // println!("got prefix length {} with key {:?}", p, key.len());
             // todo: remove hard coded "Node4"
             if p != Self::get_prefix_len(node) {
                 // make a copy of node and modify it,
@@ -352,7 +350,6 @@ impl Node {
 
 impl Node {
     fn make_node4() -> *mut Node4 {
-        // Self::Node4(Node4::new())
         Box::into_raw(Box::new(Node4::new()))
     }
 }
@@ -411,16 +408,14 @@ impl Node4 {
     pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
         for i in 0..self.header.count as usize {
             if &self.key[i].load(Relaxed) == key {
-                unsafe {
-                    return Some(&self.child[i]);
-                }
+                return Some(&self.child[i]);
             }
         }
         None
     }
 
     pub fn grow(node: &AtomicPtr<usize>) -> *mut usize {
-        let mut new_node = Box::into_raw(Box::new(Node16::new()));
+        let new_node = Box::into_raw(Box::new(Node16::new()));
         let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node4) };
 
         // copy header
@@ -490,16 +485,14 @@ impl Node16 {
         // todo: use SIMD or binary search
         for i in 0..self.header.count as usize {
             if &self.key[i].load(Relaxed) == key {
-                unsafe {
-                    return Some(&self.child[i]);
-                }
+                return Some(&self.child[i]);
             }
         }
         None
     }
 
     pub fn grow(node: &AtomicPtr<usize>) -> *mut usize {
-        let mut new_node = Box::into_raw(Box::new(Node48::new()));
+        let new_node = Box::into_raw(Box::new(Node48::new()));
         let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node16) };
 
         // copy header
@@ -571,21 +564,13 @@ impl Node48 {
 
     pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
         if self.key[*key as usize].load(Relaxed) >= 0 {
-            unsafe {
-                return Some(
-                    // (self.child[self.key[*key as usize].load(Relaxed) as usize].load(Relaxed)
-                    //     as *const Node)
-                    //     .as_ref()
-                    //     .unwrap(),
-                    &self.child[self.key[*key as usize].load(Relaxed) as usize],
-                );
-            }
+            return Some(&self.child[self.key[*key as usize].load(Relaxed) as usize]);
         }
         None
     }
 
     pub fn grow(node: &AtomicPtr<usize>) -> *mut usize {
-        let mut new_node = Box::into_raw(Box::new(Node256::new()));
+        let new_node = Box::into_raw(Box::new(Node256::new()));
         let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node48) };
 
         // copy header
@@ -652,12 +637,7 @@ impl Node256 {
 
     pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
         if !self.child[*key as usize].load(Relaxed).is_null() {
-            return Some(
-                // (self.child[*key as usize].load(Relaxed) as *const Node)
-                //     .as_ref()
-                //     .unwrap(),
-                &self.child[*key as usize],
-            );
+            return Some(&self.child[*key as usize]);
         }
         None
     }
@@ -746,6 +726,7 @@ mod test {
         println!("result kvpair: {:?}", result.unwrap());
     }
 
+    #[ignore]
     #[test]
     fn test_insert_expand() {
         let root = AtomicPtr::new(empty_node4() as *mut usize);
@@ -769,6 +750,7 @@ mod test {
         }
     }
 
+    #[ignore]
     #[test]
     fn test_insert_grow() {
         let root = AtomicPtr::new(empty_node4() as *mut usize);
@@ -794,6 +776,37 @@ mod test {
         for kv in &kvs {
             let result = Node::search(&root, kv, 0);
             println!("search {:?}, got result: {:?}", kv, result.unwrap())
+        }
+    }
+
+    #[test]
+    fn test_insert_prefix() {
+        let root = AtomicPtr::new(empty_node4() as *mut usize);
+        Node::init(&root, &[0], &[0]);
+        let test_size = 100;
+
+        let mut kvs = Vec::with_capacity(test_size);
+        let mut meta = vec![0u8];
+        for i in 1..test_size {
+            meta.push(i as u8);
+            kvs.push(meta.to_owned());
+        }
+
+        for kv in &kvs {
+            // println!("root addr: {:?}", root.load(Relaxed));
+            debug_print_atomic(&root);
+            let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
+            let kvpair_ptr = (Box::into_raw(Box::new(kvpair)) as usize + 1) as *mut KVPair;
+            // println!("{:?} addr is {:?}", kv, kvpair_ptr);
+            Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
+            // println!();
+        }
+
+        println!("insert finished");
+
+        for kv in &kvs {
+            let result = Node::search(&root, kv, 0);
+            println!("search {:?}, got result: {:?}", kv.len(), result.unwrap())
         }
     }
 }
