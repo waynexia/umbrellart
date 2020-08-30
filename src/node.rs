@@ -36,7 +36,17 @@ impl Node {
         // run out of key bytes, should reach leaf node
         if depth == key.len() {
             if Self::is_leaf_match(node, key) {
-                return Some(node.load(Relaxed));
+                if Self::is_kvpair(node) {
+                    return Some(node.load(Relaxed));
+                } else {
+                    let node4 = Self::to_node4(node);
+                    return if let Some(leaf_ptr) = &node4.leaf {
+                        Some((leaf_ptr.load(Relaxed) as usize - 1) as *mut usize)
+                    } else {
+                        // assert leaf exist?
+                        None
+                    };
+                }
             }
             return None;
         }
@@ -74,17 +84,15 @@ impl Node {
             return Ok(());
         }
         unsafe {
-            // reached a kvpair node. should insert a inner node, move kvpair to `leaf` and add 1 child.
+            // reached a kvpair node. replace it by a inner node, move kvpair to `leaf` and add 1 child.
             // this happens when old key is substring of new key.
             if Self::is_kvpair(node) {
                 let new_inner_node_ptr = Self::make_node4() as *mut usize;
-                let mut new_header = Self::get_header_mut(new_inner_node_ptr);
                 // maybe no prefix? Todo: check this
                 // for i in depth..(key.len() - 1).min(depth + MAX_PREFIX_STORED) {
                 //     new_header.prefix[depth - i] = key[i];
                 // }
                 // new_header.prefix_len = (key.len() - 1 - depth) as u32;
-                new_header.count = 1;
                 let new_inner_node = &mut *(new_inner_node_ptr as *mut Node4);
                 new_inner_node.leaf = Some(AtomicPtr::new(node.load(Relaxed)));
                 let tmp_atomic = AtomicPtr::new(new_inner_node_ptr); // todo: remove this
@@ -93,31 +101,6 @@ impl Node {
                 node.store(new_inner_node_ptr, Relaxed);
                 return Ok(());
             }
-            // ???
-            // general leaf node?
-            // if Self::is_kvpair(node) {
-            //     let mut new_inner_node = AtomicPtr::new(Self::make_node4() as *mut usize);
-            //     let new_leaf_node = Self::make_node4();
-            //     // set new inner node's prefix to intersection of two keys
-            //     let overlap = key.len().min(Self::get_prefix_len(node) as usize);
-            //     for i in 0..overlap {
-            //         Self::get_header_mut(new_inner_node.load(Relaxed) as *mut usize).prefix[i] =
-            //             key[i + depth];
-            //     }
-            //     // todo: what if prefix_len > Max_stored_prefix?
-            //     // todo: need to adjust prefix for node and new_leaf_node?
-            //     Self::get_header_mut(new_inner_node.load(Relaxed) as *mut usize).prefix_len =
-            //         overlap as u32;
-            //     Self::add_child(&new_inner_node, key[depth], new_leaf_node as *const usize);
-            //     Self::add_child(
-            //         &new_inner_node,
-            //         Self::load_prefix(node).unwrap()[depth], //?
-            //         node.load(Relaxed) as *const usize,
-            //     );
-            //     // todo: atomic swap node and new_inner_node
-            //     // node and other pointers should be AtomicPtr
-            //     return Ok(());
-            // }
             let p = Self::check_prefix(node, key, depth);
             // println!("got prefix length {} with key {:?}", p, key.len());
             // todo: remove hard coded "Node4"
@@ -163,8 +146,8 @@ impl Node {
                 if Self::is_full(node) {
                     Self::grow(&node);
                 }
-                // let new_leaf_node = Self::make_node4();
-                Self::add_child(node, key[depth], leaf as *mut usize);
+                let new_leaf_node = Self::make_new_leaf(key, leaf, depth + 1);
+                Self::add_child(node, key[depth], new_leaf_node);
             }
             return Ok(());
         }
@@ -345,6 +328,26 @@ impl Node {
         };
 
         node.store(grown, Relaxed);
+    }
+
+    fn make_new_leaf(key: &[u8], leaf: *mut KVPair, depth: usize) -> *mut usize {
+        // needn't to wrap a Node4
+        if key.len() == depth {
+            return leaf as *mut usize;
+        }
+
+        let new_leaf = Self::make_node4();
+        unsafe {
+            let header = Self::get_header_mut(new_leaf as *mut usize);
+            header.count = 1;
+            header.prefix_len = (key.len() - depth - 1) as u32;
+            for i in 0..header.prefix_len as usize {
+                header.prefix[i] = key[i + depth];
+            }
+            (*new_leaf).key[0].store(key[depth], Relaxed);
+            (*new_leaf).child[0].store(leaf as *mut usize, Relaxed);
+        }
+        new_leaf as *mut usize
     }
 }
 
@@ -714,7 +717,6 @@ mod test {
         // debug_print(node.load(Relaxed));
     }
 
-    #[ignore]
     #[test]
     fn init() {
         let root = AtomicPtr::new(empty_node4() as *mut usize);
@@ -726,7 +728,6 @@ mod test {
         println!("result kvpair: {:?}", result.unwrap());
     }
 
-    #[ignore]
     #[test]
     fn test_insert_expand() {
         let root = AtomicPtr::new(empty_node4() as *mut usize);
@@ -750,7 +751,6 @@ mod test {
         }
     }
 
-    #[ignore]
     #[test]
     fn test_insert_grow() {
         let root = AtomicPtr::new(empty_node4() as *mut usize);
@@ -780,7 +780,7 @@ mod test {
     }
 
     #[test]
-    fn test_insert_prefix() {
+    fn test_insert_substring() {
         let root = AtomicPtr::new(empty_node4() as *mut usize);
         Node::init(&root, &[0], &[0]);
         let test_size = 100;
@@ -807,6 +807,32 @@ mod test {
         for kv in &kvs {
             let result = Node::search(&root, kv, 0);
             println!("search {:?}, got result: {:?}", kv.len(), result.unwrap())
+        }
+    }
+
+    #[test]
+    fn test_insert_collapse() {
+        let root = AtomicPtr::new(empty_node4() as *mut usize);
+        Node::init(&root, &[1], &[0]);
+
+        let kvs = vec![
+            vec![0, 0],
+            vec![0, 0, 0],
+            vec![3, 3, 3, 3],
+            vec![4, 4, 4, 4, 4],
+        ];
+
+        for k in &kvs {
+            let kvpair = KVPair::new(k.to_vec(), k.to_vec());
+            let kvpair_ptr = (Box::into_raw(Box::new(kvpair)) as usize + 1) as *mut KVPair;
+            Node::insert(&root, k, kvpair_ptr, 0).unwrap();
+        }
+
+        println!("insert finished");
+
+        for k in &kvs {
+            let result = Node::search(&root, k, 0);
+            println!("search {:?}, got result: {:?}", k.len(), result.unwrap())
         }
     }
 }
