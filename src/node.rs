@@ -1,10 +1,13 @@
 #[allow(unused_variables)]
 use std::cmp::Ordering;
+use std::fmt::{self, Debug, Formatter};
 use std::mem::{self, MaybeUninit};
 use std::ptr;
-use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicI8, AtomicPtr, AtomicU8};
 use std::sync::Arc;
+
+use log::{debug, info};
 
 type PrefixCount = u32;
 const MAX_PREFIX_STORED: usize = 10;
@@ -17,7 +20,6 @@ impl Node {
     pub fn init(node: &AtomicPtr<usize>, key: &[u8], value: &[u8]) {
         let mut header = Self::get_header_mut(node.load(Relaxed));
         assert!(header.count == 0);
-        // header.count = 1;
         header.prefix_len = key.len() as u32 - 1;
         for i in 0..(header.prefix_len as usize).min(MAX_PREFIX_STORED) {
             header.prefix[i] = key[i];
@@ -29,7 +31,7 @@ impl Node {
 
     pub fn search<'a>(node: &'a AtomicPtr<usize>, key: &[u8], depth: usize) -> Option<*mut usize> {
         if node.load(Relaxed).is_null() {
-            println!("search encounted a null ptr");
+            info!("search encounted a null ptr");
             return None;
         }
         // lazy expansion
@@ -52,7 +54,7 @@ impl Node {
         }
         // check compressed path pessimistically
         if Self::check_prefix(node, key, depth) != Self::get_prefix_len(node) {
-            println!(
+            debug!(
                 "prefix not match, {} != {}",
                 Self::check_prefix(node, key, depth),
                 Self::get_prefix_len(node)
@@ -89,10 +91,6 @@ impl Node {
             if Self::is_kvpair(node) {
                 let new_inner_node_ptr = Self::make_node4() as *mut usize;
                 // maybe no prefix? Todo: check this
-                // for i in depth..(key.len() - 1).min(depth + MAX_PREFIX_STORED) {
-                //     new_header.prefix[depth - i] = key[i];
-                // }
-                // new_header.prefix_len = (key.len() - 1 - depth) as u32;
                 let new_inner_node = &mut *(new_inner_node_ptr as *mut Node4);
                 new_inner_node.leaf = Some(AtomicPtr::new(node.load(Relaxed)));
                 let tmp_atomic = AtomicPtr::new(new_inner_node_ptr); // todo: remove this
@@ -102,7 +100,6 @@ impl Node {
                 return Ok(());
             }
             let p = Self::check_prefix(node, key, depth);
-            // println!("got prefix length {} with key {:?}", p, key.len());
             // todo: remove hard coded "Node4"
             if p != Self::get_prefix_len(node) {
                 // make a copy of node and modify it,
@@ -121,8 +118,6 @@ impl Node {
                     header.prefix[i] = node_prefix[i];
                 }
 
-                // let new_leaf_node = Self::make_node4() as *mut usize;
-                // Self::add_child(&new_inner_node, key[depth + p as usize], new_leaf_node);
                 Self::add_child(
                     &new_inner_node,
                     key[depth + p as usize],
@@ -378,6 +373,7 @@ impl KVPair {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 struct Node4 {
     header: Header,
     leaf: Option<AtomicPtr<usize>>,
@@ -423,11 +419,6 @@ impl Node4 {
 
         // copy header
         unsafe {
-            // ptr::copy_nonoverlapping(
-            //     &fulled_node.header,
-            //     &mut (*new_node).header,
-            //     mem::size_of::<Header>(),
-            // );
             // todo: make a function
             let mut dst_header = &mut (*new_node).header;
             dst_header.count = 4;
@@ -454,6 +445,7 @@ impl Node4 {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 struct Node16 {
     header: Header,
     leaf: Option<AtomicPtr<usize>>,
@@ -500,11 +492,6 @@ impl Node16 {
 
         // copy header
         unsafe {
-            // ptr::copy_nonoverlapping(
-            //     &fulled_node.header,
-            //     &mut (*new_node).header,
-            //     mem::size_of::<Header>(),
-            // );
             // todo: make a function
             let mut dst_header = &mut (*new_node).header;
             dst_header.count = 16;
@@ -531,6 +518,7 @@ impl Node16 {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 struct Node48 {
     header: Header,
     leaf: Option<AtomicPtr<usize>>,
@@ -578,11 +566,6 @@ impl Node48 {
 
         // copy header
         unsafe {
-            // ptr::copy_nonoverlapping(
-            //     &fulled_node.header,
-            //     &mut (*new_node).header,
-            //     mem::size_of::<Header>(),
-            // );
             // todo: make a function
             let mut dst_header = &mut (*new_node).header;
             dst_header.count = 48;
@@ -613,6 +596,7 @@ impl Node48 {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 struct Node256 {
     header: Header,
     leaf: Option<AtomicPtr<usize>>,
@@ -674,10 +658,10 @@ impl Header {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::collections::HashMap;
 
     fn empty_node4() -> *mut Node4 {
         let node = Node::make_node4();
-        // let header = Node::get_header_mut(node);
         node
     }
 
@@ -686,46 +670,36 @@ mod test {
             match (node_ptr as *mut Header).as_ref().unwrap().node_type {
                 NodeType::Node4 => {
                     let node = (node_ptr as *mut Node4).as_ref().unwrap();
-                    println!("got a node4, header: {:?}", node.header);
-                    println!("with key/values:\nkeys: ");
-                    for i in 0..4 {
-                        print!("No.{}: {}, ", i, node.key[i].load(Relaxed));
-                    }
-                    println!("\nvalues: ");
-                    for i in 0..4 {
-                        print!("No.{}: {:?}, ", i, node.child[i].load(Relaxed));
-                    }
-                    println!();
-                } // NodeType::Node16 => {
-                //     println!("got a node16");
-                //     todo!()
-                // }
-                // NodeType::Node48 => {
-                //     println!("got a node48");
-                //     todo!()
-                // }
-                // NodeType::Node256 => {
-                //     println!("got a node256");
-                //     todo!()
-                // }
-                _ => todo!("got pointer {:?}", node_ptr),
+                    debug!("Node4: {:?}", node);
+                }
+                NodeType::Node16 => {
+                    let node = (node_ptr as *mut Node16).as_ref().unwrap();
+                    debug!("Node4: {:?}", node);
+                }
+                NodeType::Node48 => {
+                    let node = (node_ptr as *mut Node48).as_ref().unwrap();
+                    debug!("Node4: {:?}", node);
+                }
+                NodeType::Node256 => {
+                    let node = (node_ptr as *mut Node256).as_ref().unwrap();
+                    debug!("Node4: {:?}", node);
+                }
             }
         }
     }
 
     fn debug_print_atomic(node: &AtomicPtr<usize>) {
-        // debug_print(node.load(Relaxed));
+        debug_print(node.load(Relaxed));
     }
 
     #[test]
     fn init() {
         let root = AtomicPtr::new(empty_node4() as *mut usize);
         Node::init(&root, &[1, 2, 3, 4], &[1, 2, 3, 4]);
-        // Node::insert(&root, &[1], 1, &0);
         let header = Node::get_header(&root);
-        println!("header: {:?}", header);
+        debug!("header: {:?}", header);
         let result = Node::search(&root, &[1, 2, 3, 4], 0);
-        println!("result kvpair: {:?}", result.unwrap());
+        debug!("result kvpair: {:?}", result.unwrap());
     }
 
     #[test]
@@ -734,20 +708,20 @@ mod test {
         Node::init(&root, &[1, 2, 3, 4], &[1, 2, 3, 4]);
 
         let kvs = vec![vec![1, 2, 1], vec![1, 2, 2], vec![1, 2, 2, 1]];
+
+        let mut answer = HashMap::new();
         for kv in &kvs {
-            println!("root addr: {:?}", root.load(Relaxed));
             debug_print_atomic(&root);
             let kvpair = KVPair::new(kv.to_owned(), kv.to_owned());
-            let kvpair_ptr = (Box::into_raw(Box::new(kvpair)) as usize + 1) as *mut KVPair;
+            let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
+            let kvpair_ptr = (kvpair_ptr as usize + 1) as *mut KVPair;
             Node::insert(&root, &kv, kvpair_ptr, 0).unwrap();
-            println!();
         }
-
-        println!("insert finished");
 
         for kv in kvs {
             let result = Node::search(&root, &kv, 0);
-            println!("search {:?}, got result: {:?}", kv, result.unwrap())
+            assert_eq!(result.unwrap(), *answer.get(&kv).unwrap());
         }
     }
 
@@ -761,21 +735,19 @@ mod test {
             kvs[i - 1][3] = i as u8;
         }
 
+        let mut answer = HashMap::new();
         for kv in &kvs {
-            println!("root addr: {:?}", root.load(Relaxed));
             debug_print_atomic(&root);
             let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
-            let kvpair_ptr = (Box::into_raw(Box::new(kvpair)) as usize + 1) as *mut KVPair;
-            println!("{:?} addr is {:?}", kv, kvpair_ptr);
+            let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
+            let kvpair_ptr = (kvpair_ptr as usize + 1) as *mut KVPair;
             Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
-            println!();
         }
-
-        println!("insert finished");
 
         for kv in &kvs {
             let result = Node::search(&root, kv, 0);
-            println!("search {:?}, got result: {:?}", kv, result.unwrap())
+            assert_eq!(result.unwrap(), *answer.get(kv).unwrap());
         }
     }
 
@@ -792,21 +764,19 @@ mod test {
             kvs.push(meta.to_owned());
         }
 
+        let mut answer = HashMap::new();
         for kv in &kvs {
-            // println!("root addr: {:?}", root.load(Relaxed));
             debug_print_atomic(&root);
             let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
-            let kvpair_ptr = (Box::into_raw(Box::new(kvpair)) as usize + 1) as *mut KVPair;
-            // println!("{:?} addr is {:?}", kv, kvpair_ptr);
+            let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
+            let kvpair_ptr = (kvpair_ptr as usize + 1) as *mut KVPair;
             Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
-            // println!();
         }
-
-        println!("insert finished");
 
         for kv in &kvs {
             let result = Node::search(&root, kv, 0);
-            println!("search {:?}, got result: {:?}", kv.len(), result.unwrap())
+            assert_eq!(result.unwrap(), *answer.get(kv).unwrap());
         }
     }
 
@@ -817,22 +787,23 @@ mod test {
 
         let kvs = vec![
             vec![0, 0],
-            vec![0, 0, 0],
+            vec![0, 0, 0, 0],
             vec![3, 3, 3, 3],
             vec![4, 4, 4, 4, 4],
         ];
 
+        let mut answer = HashMap::new();
         for k in &kvs {
             let kvpair = KVPair::new(k.to_vec(), k.to_vec());
-            let kvpair_ptr = (Box::into_raw(Box::new(kvpair)) as usize + 1) as *mut KVPair;
+            let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            answer.insert(k.to_owned(), kvpair_ptr as *mut usize);
+            let kvpair_ptr = (kvpair_ptr as usize + 1) as *mut KVPair;
             Node::insert(&root, k, kvpair_ptr, 0).unwrap();
         }
 
-        println!("insert finished");
-
         for k in &kvs {
             let result = Node::search(&root, k, 0);
-            println!("search {:?}, got result: {:?}", k.len(), result.unwrap())
+            assert_eq!(result.unwrap(), *answer.get(k).unwrap());
         }
     }
 }
