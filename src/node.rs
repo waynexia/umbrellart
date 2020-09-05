@@ -1,3 +1,4 @@
+use std::alloc::{dealloc, Layout};
 #[allow(unused_variables)]
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter};
@@ -152,26 +153,24 @@ impl Node {
         if node.load(Relaxed).is_null() {
             return None;
         }
-        unsafe {
-            // reach kvpair means item not found?
-            if Self::is_kvpair(node) {
-                return None;
-            }
-            // need check `leaf` field
-            // todo: under write ex this need not to be atomit
-            if depth == key.len() {
-                let leaf = &Self::to_node4(node).leaf;
-                loop {
-                    let leaf_ptr = leaf.load(Relaxed);
-                    if Self::is_leaf_match(node, key) {
-                        if leaf.compare_and_swap(leaf_ptr, 0 as *mut usize, Relaxed) == leaf_ptr {
-                            return Some(leaf_ptr);
-                        } else {
-                            continue;
-                        }
+        if Self::is_kvpair(node) {
+            // return None;
+            unreachable!("will not reach kvpair");
+        }
+        // need check `leaf` field
+        // todo: under write ex this need not to be atomit
+        if depth == key.len() {
+            let leaf = &Self::to_node4(node).leaf;
+            loop {
+                let leaf_ptr = leaf.load(Relaxed);
+                if Self::is_leaf_match(node, key) {
+                    if leaf.compare_and_swap(leaf_ptr, 0 as *mut usize, Relaxed) == leaf_ptr {
+                        return Some(leaf_ptr);
                     } else {
-                        return None;
+                        continue;
                     }
+                } else {
+                    return None;
                 }
             }
         }
@@ -183,13 +182,29 @@ impl Node {
         let next = Self::find_child(node, &key[depth])?;
         if Node::is_kvpair(next) {
             if Node::is_leaf_match(next, key) {
-                // to remove `next`
-                todo!("to remove `next`");
+                if Self::is_underflow(node) {
+                    Self::shrink(node);
+                }
+                let removed = Self::remove_child(node, key[depth]);
+                if Self::is_kvpair(&Arc::new(AtomicPtr::new(removed as *mut usize))) {
+                    let raw_ptr = (removed as usize - 1) as *mut KVPair;
+                    unsafe {
+                        ptr::drop_in_place(raw_ptr);
+                        dealloc(raw_ptr as *mut u8, Layout::new::<KVPair>());
+                    }
+                }
             }
             return None;
         }
 
-        return Self::remove(next, key, depth + 1);
+        let ret = Self::remove(next, key, depth + 1);
+        // downgrade empty inner node to its `leaf`
+        if Self::get_header(next).count == 0 {
+            let leaf = &Self::to_node4(node).leaf;
+            next.store(leaf.load(Relaxed), Relaxed);
+        }
+
+        ret
     }
 }
 
@@ -337,6 +352,33 @@ impl Node {
                 }
             }
         }
+    }
+
+    fn remove_child(node_ptr: &AtomicPtr<usize>, key_byte: u8) -> *mut KVPair {
+        assert!(!Self::is_kvpair(node_ptr));
+
+        let ret = unsafe {
+            match Self::get_header(node_ptr).node_type {
+                NodeType::Node4 => {
+                    let node = node_ptr.load(Relaxed) as *mut Node4;
+                    (*node).remove_child(key_byte)
+                }
+                NodeType::Node16 => {
+                    let node = node_ptr.load(Relaxed) as *mut Node16;
+                    (*node).remove_child(key_byte)
+                }
+                NodeType::Node48 => {
+                    let node = node_ptr.load(Relaxed) as *mut Node48;
+                    (*node).remove_child(key_byte)
+                }
+                NodeType::Node256 => {
+                    let node = node_ptr.load(Relaxed) as *mut Node256;
+                    (*node).remove_child(key_byte)
+                }
+            }
+        };
+
+        ret as *mut KVPair
     }
 
     fn is_overflow(node: &AtomicPtr<usize>) -> bool {
@@ -503,6 +545,16 @@ impl Node4 {
         self.child[self.header.count as usize].store(child as *mut usize, Relaxed);
         self.header.count += 1;
     }
+
+    pub fn remove_child(&mut self, key: u8) -> *mut usize {
+        self.header.count -= 1;
+        for i in 0..4 {
+            if self.key[i].load(Relaxed) == key {
+                return self.child[i].swap(ptr::null::<usize>() as *mut usize, Relaxed);
+            }
+        }
+        unreachable!("key must exist")
+    }
 }
 
 #[repr(C)]
@@ -594,6 +646,16 @@ impl Node16 {
         self.key[self.header.count as usize].store(key, Relaxed);
         self.child[self.header.count as usize].store(child as *mut usize, Relaxed);
         self.header.count += 1;
+    }
+
+    pub fn remove_child(&mut self, key: u8) -> *mut usize {
+        self.header.count -= 1;
+        for i in 0..16 {
+            if self.key[i].load(Relaxed) == key {
+                return self.child[i].swap(ptr::null_mut(), Relaxed);
+            }
+        }
+        unreachable!("key must exist")
     }
 }
 
@@ -694,6 +756,13 @@ impl Node48 {
         self.key[key as usize].store(self.header.count as i8, Relaxed);
         self.header.count += 1;
     }
+
+    pub fn remove_child(&mut self, key: u8) -> *mut usize {
+        self.header.count -= 1;
+
+        let pos = self.key[key as usize].swap(-1, Relaxed);
+        self.child[pos as usize].swap(ptr::null_mut(), Relaxed)
+    }
 }
 
 #[repr(C)]
@@ -755,6 +824,11 @@ impl Node256 {
 
     pub fn add_child(&self, key: u8, child: *const usize) {
         self.child[key as usize].store(child as *mut usize, Relaxed);
+    }
+
+    pub fn remove_child(&mut self, key: u8) -> *mut usize {
+        self.header.count -= 1;
+        self.child[key as usize].swap(ptr::null_mut(), Relaxed)
     }
 }
 
