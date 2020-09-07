@@ -2,6 +2,7 @@ use std::alloc::{dealloc, Layout};
 #[allow(unused_variables)]
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter};
+use std::marker::PhantomData;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
 use std::sync::atomic::Ordering::Relaxed;
@@ -483,6 +484,7 @@ impl KVPair {
 #[derive(Debug)]
 struct Node4 {
     header: Header,
+    rc: NodeRef<Node4>,
     leaf: AtomicPtr<usize>,
     // mark keys exist or not in bits
     mask: AtomicU8,
@@ -506,14 +508,25 @@ impl Node4 {
 
             unsafe { (mem::transmute(key), mem::transmute(child)) }
         };
-        Self {
+
+        #[allow(invalid_value)]
+        let rc: NodeRef<Node4> = unsafe { MaybeUninit::uninit().assume_init() };
+
+        let mut ret = Self {
             header: Header::new(NodeType::Node4),
-            key,
+            rc,
             mask: AtomicU8::new(0),
             usued: AtomicU8::new(0),
+            key,
             child,
             leaf: AtomicPtr::default(),
-        }
+        };
+
+        let addr = &ret as *const Node4 as *mut Node4;
+        let rc = NodeRef::new(addr);
+        mem::forget(mem::replace(&mut ret.rc, rc));
+
+        ret
     }
 
     pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
@@ -580,6 +593,7 @@ impl Node4 {
 struct Node16 {
     header: Header,
     leaf: AtomicPtr<usize>,
+    rc: NodeRef<Node16>,
     mask: AtomicU16,
     usued: AtomicU8,
     key: [AtomicU8; 16],
@@ -601,14 +615,24 @@ impl Node16 {
 
             unsafe { (mem::transmute(key), mem::transmute(child)) }
         };
-        Self {
+        #[allow(invalid_value)]
+        let rc: NodeRef<Node16> = unsafe { MaybeUninit::uninit().assume_init() };
+
+        let mut ret = Self {
             header: Header::new(NodeType::Node16),
+            rc,
             leaf: AtomicPtr::default(),
             mask: AtomicU16::new(0),
             usued: AtomicU8::new(0),
             key,
             child,
-        }
+        };
+
+        let addr = &ret as *const Node16 as *mut Node16;
+        let rc = NodeRef::new(addr);
+        mem::forget(mem::replace(&mut ret.rc, rc));
+
+        ret
     }
 
     pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
@@ -697,6 +721,7 @@ impl Node16 {
 #[derive(Debug)]
 struct Node48 {
     header: Header,
+    rc: NodeRef<Node48>,
     leaf: AtomicPtr<usize>,
     // Stores child index, negative means not exist
     key: [AtomicI8; 256],
@@ -721,12 +746,22 @@ impl Node48 {
 
             unsafe { (mem::transmute(key), mem::transmute(child)) }
         };
-        Self {
+        #[allow(invalid_value)]
+        let rc: NodeRef<Node48> = unsafe { MaybeUninit::uninit().assume_init() };
+
+        let mut ret = Self {
             header: Header::new(NodeType::Node48),
+            rc,
             key,
             child,
             leaf: AtomicPtr::default(),
-        }
+        };
+
+        let addr = &ret as *const Node48 as *mut Node48;
+        let rc = NodeRef::new(addr);
+        mem::forget(mem::replace(&mut ret.rc, rc));
+
+        ret
     }
 
     pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
@@ -803,6 +838,7 @@ impl Node48 {
 #[derive(Debug)]
 struct Node256 {
     header: Header,
+    rc: NodeRef<Node256>,
     leaf: AtomicPtr<usize>,
     child: [AtomicPtr<usize>; 256],
 }
@@ -819,11 +855,21 @@ impl Node256 {
 
             unsafe { mem::transmute(child) }
         };
-        Self {
+        #[allow(invalid_value)]
+        let rc: NodeRef<Node256> = unsafe { MaybeUninit::uninit().assume_init() };
+
+        let mut ret = Self {
             header: Header::new(NodeType::Node256),
+            rc,
             child,
             leaf: AtomicPtr::default(),
-        }
+        };
+
+        let addr = &ret as *const Node256 as *mut Node256;
+        let rc = NodeRef::new(addr);
+        mem::forget(mem::replace(&mut ret.rc, rc));
+
+        ret
     }
 
     pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
@@ -863,6 +909,41 @@ impl Node256 {
     pub fn remove_child(&mut self, key: u8) -> *mut usize {
         self.header.count -= 1;
         self.child[key as usize].swap(ptr::null_mut(), Relaxed)
+    }
+}
+
+#[derive(Debug)]
+struct NodePtr<T> {
+    ptr: *mut T,
+}
+
+impl<T> NodePtr<T> {
+    fn new(ptr: *mut T) -> Self {
+        Self { ptr }
+    }
+}
+
+impl<T> Drop for NodePtr<T> {
+    fn drop(&mut self) {
+        println!("dropper called");
+        unsafe {
+            ptr::drop_in_place(self.ptr as *mut T);
+            dealloc(self.ptr as *mut u8, Layout::new::<T>());
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NodeRef<T>(Arc<NodePtr<T>>);
+
+impl<T> NodeRef<T> {
+    fn new(ptr: *mut T) -> Self {
+        NodeRef(Arc::new(NodePtr::new(ptr)))
+    }
+
+    unsafe fn obsolate(&self) {
+        let ptr = Arc::into_raw(self.0.clone());
+        Arc::decr_strong_count(ptr);
     }
 }
 
