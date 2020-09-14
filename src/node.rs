@@ -1,8 +1,6 @@
 use std::alloc::{dealloc, Layout};
 #[allow(unused_variables)]
-use std::cmp::Ordering;
-use std::fmt::{self, Debug, Formatter};
-use std::marker::PhantomData;
+use std::fmt::Debug;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
 use std::sync::atomic::Ordering::Relaxed;
@@ -13,8 +11,6 @@ use log::{debug, info};
 
 type PrefixCount = u32;
 const MAX_PREFIX_STORED: usize = 10;
-type K = usize;
-type V = usize;
 
 pub struct Node {}
 
@@ -155,7 +151,6 @@ impl Node {
             return None;
         }
         if Self::is_kvpair(node) {
-            // return None;
             unreachable!("will not reach kvpair");
         }
         // need check `leaf` field
@@ -232,23 +227,6 @@ impl Node {
         unsafe { &*(node.load(Relaxed) as *mut Node4) }
     }
 
-    // fully check stored key
-    fn leaf_match(node: &AtomicPtr<usize>, key: &[u8], _depth: &usize) -> bool {
-        assert!(Self::is_kvpair(node));
-
-        let kvpair = unsafe { &*((node.load(Relaxed) as usize - 1) as *const KVPair) };
-        if kvpair.key.len() != key.len() {
-            return false;
-        }
-
-        for (stored, expected) in kvpair.key.iter().zip(key) {
-            if stored != expected {
-                return false;
-            }
-        }
-        return true;
-    }
-
     // Return node.header.prefix_len if match, or 0 if not.
     fn check_prefix(node: &AtomicPtr<usize>, key: &[u8], depth: usize) -> PrefixCount {
         assert!(!Self::is_kvpair(node));
@@ -307,20 +285,10 @@ impl Node {
     }
 
     fn get_header_mut<'a>(node: *mut usize) -> &'a mut Header {
-        // assert!(!Self::is_leaf(node));
-
-        // &mut unsafe { *(node.load(Relaxed) as *mut Header) }
         unsafe { &mut *(node as *mut Header) }
     }
 
-    fn load_prefix(node: &AtomicPtr<usize>) -> Option<&[u8]> {
-        assert!(!Self::is_kvpair(node));
-
-        Some(&Self::get_header(node).prefix)
-    }
-
     // todo: SIMD
-    // todo: order-preserving
     fn add_child(node_ptr: &AtomicPtr<usize>, key_byte: u8, child: *const usize) {
         assert!(!Self::is_kvpair(node_ptr));
 
@@ -373,6 +341,7 @@ impl Node {
         ret as *mut KVPair
     }
 
+    // Check node is overflow or not.
     fn is_overflow(node: &AtomicPtr<usize>) -> bool {
         let header = Self::get_header(node);
         header.count
@@ -573,7 +542,7 @@ impl Node4 {
         let mask = self.mask.load(Relaxed);
         for i in 0..4 {
             if mask >> i & 1 == 1 && self.key[i].load(Relaxed) == key {
-                self.mask.store(mask & (u8::MAX - (1 << i)), Relaxed); // todo: fix this
+                self.mask.store(mask - (1 << i), Relaxed); // todo: fix this
                 return self.child[i].swap(ptr::null::<usize>() as *mut usize, Relaxed);
             }
         }
@@ -677,7 +646,9 @@ impl Node16 {
                     cnt += 1;
                 }
             }
-            assert_eq!(cnt, 4);
+            (*new_node).usued.store(3, Relaxed);
+            (*new_node).mask.store((1 << 3) - 1, Relaxed);
+            assert_eq!(cnt, 3);
         }
 
         new_node as *mut usize
@@ -702,7 +673,7 @@ impl Node16 {
         for i in 0..usued as usize {
             if mask >> i & 1 == 1 && self.key[i].load(Relaxed) == key {
                 // todo: fix this
-                self.mask.store(0, Relaxed);
+                self.mask.store(mask - (1 << i), Relaxed);
                 return self.child[i].swap(ptr::null_mut(), Relaxed);
             }
         }
@@ -807,7 +778,9 @@ impl Node48 {
                     cnt += 1;
                 }
             }
-            assert_eq!(cnt, 16);
+            (*new_node).usued.store(15, Relaxed);
+            (*new_node).mask.store((1 << 15) - 1, Relaxed);
+            assert_eq!(cnt, 15);
         }
 
         new_node as *mut usize
@@ -889,14 +862,15 @@ impl Node256 {
                     cnt += 1;
                 }
             }
-            assert_eq!(cnt, 48);
+            assert_eq!(cnt, 47);
         }
 
         new_node as *mut usize
     }
 
-    pub fn add_child(&self, key: u8, child: *const usize) {
+    pub fn add_child(&mut self, key: u8, child: *const usize) {
         self.child[key as usize].store(child as *mut usize, Relaxed);
+        self.header.count += 1;
     }
 
     pub fn remove_child(&mut self, key: u8) -> *mut usize {
@@ -934,6 +908,7 @@ impl<T> NodeRef<T> {
         NodeRef(Arc::new(NodePtr::new(ptr)))
     }
 
+    #[allow(unused)]
     unsafe fn obsolate(&self) {
         let ptr = Arc::into_raw(self.0.clone());
         Arc::decr_strong_count(ptr);
@@ -945,7 +920,8 @@ impl<T> NodeRef<T> {
 struct Header {
     node_type: NodeType,
     // item count
-    count: u8,
+    // todo: change `count` to u8
+    count: u16,
     prefix_len: PrefixCount,
     prefix: [u8; MAX_PREFIX_STORED],
 }
@@ -1079,14 +1055,14 @@ mod test {
         }
 
         //remove
-        // for kv in &kvs {
-        //     let result = Node::remove(&root, kv, 0).unwrap();
-        //     let kvpair = unsafe { &*(result as *mut KVPair) };
-        //     assert_eq!(kvpair.value.as_slice(), kv);
-        //     unsafe {
-        //         let _ = Box::from_raw(result);
-        //     }
-        // }
+        for kv in &kvs {
+            let result = Node::remove(&root, kv, 0).unwrap();
+            let kvpair = unsafe { &*(result as *mut KVPair) };
+            assert_eq!(kvpair.value.as_slice(), kv);
+            unsafe {
+                let _ = Box::from_raw(result);
+            }
+        }
     }
 
     #[test]
@@ -1102,6 +1078,7 @@ mod test {
             kvs.push(meta.to_owned());
         }
 
+        // insert
         let mut answer = HashMap::new();
         for kv in &kvs {
             debug_print_atomic(&root);
@@ -1112,6 +1089,7 @@ mod test {
             Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
         }
 
+        // search
         for kv in &kvs {
             let result = Node::search(&root, kv, 0);
             assert_eq!(result.unwrap(), *answer.get(kv).unwrap());
@@ -1142,6 +1120,16 @@ mod test {
         for k in &kvs {
             let result = Node::search(&root, k, 0);
             assert_eq!(result.unwrap(), *answer.get(k).unwrap());
+        }
+
+        // remove
+        for kv in &kvs {
+            let result = Node::remove(&root, kv, 0).unwrap();
+            let kvpair = unsafe { &*(result as *mut KVPair) };
+            assert_eq!(&kvpair.value, kv);
+            unsafe {
+                let _ = Box::from_raw(result);
+            }
         }
     }
 }
