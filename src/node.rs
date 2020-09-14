@@ -159,20 +159,13 @@ impl Node {
             unreachable!("will not reach kvpair");
         }
         // need check `leaf` field
-        // todo: under write ex this need not to be atomit
         if depth == key.len() {
             let leaf = &Self::to_node4(node).leaf;
-            loop {
-                let leaf_ptr = leaf.load(Relaxed);
-                if Self::is_leaf_match(node, key) {
-                    if leaf.compare_and_swap(leaf_ptr, 0 as *mut usize, Relaxed) == leaf_ptr {
-                        return Some(leaf_ptr);
-                    } else {
-                        continue;
-                    }
-                } else {
-                    return None;
-                }
+            if Self::is_leaf_match(leaf, key) {
+                let ret = leaf.swap(ptr::null::<*const usize>() as *mut usize, Relaxed);
+                return Some((ret as usize - 1) as *mut usize);
+            } else {
+                return None;
             }
         }
 
@@ -580,7 +573,7 @@ impl Node4 {
         let mask = self.mask.load(Relaxed);
         for i in 0..4 {
             if mask >> i & 1 == 1 && self.key[i].load(Relaxed) == key {
-                self.mask.store(mask & 0 << i, Relaxed); // todo: fix this
+                self.mask.store(mask & (u8::MAX - (1 << i)), Relaxed); // todo: fix this
                 return self.child[i].swap(ptr::null::<usize>() as *mut usize, Relaxed);
             }
         }
@@ -1048,15 +1041,14 @@ mod test {
         }
 
         //remove
-        // for kv in kvs {
-        //     let result = Node::remove(&root, &kv, 0).unwrap();
-        //     let kvpair = unsafe { &*(result as *mut KVPair) };
-        //     assert_eq!(kvpair.value.as_slice(), kv);
-        //     println!("removed {:?}", kvpair);
-        //     unsafe {
-        //         let _ = Box::from_raw(result);
-        //     }
-        // }
+        for kv in kvs {
+            let result = Node::remove(&root, &kv, 0).unwrap();
+            let kvpair = unsafe { &*(result as *mut KVPair) };
+            assert_eq!(kvpair.value.as_slice(), kv);
+            unsafe {
+                let _ = Box::from_raw(result);
+            }
+        }
     }
 
     #[test]
@@ -1069,6 +1061,7 @@ mod test {
             kvs[i - 1][3] = i as u8;
         }
 
+        // insert
         let mut answer = HashMap::new();
         for kv in &kvs {
             debug_print_atomic(&root);
@@ -1079,10 +1072,21 @@ mod test {
             Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
         }
 
+        // search
         for kv in &kvs {
             let result = Node::search(&root, kv, 0);
             assert_eq!(result.unwrap(), *answer.get(kv).unwrap());
         }
+
+        //remove
+        // for kv in &kvs {
+        //     let result = Node::remove(&root, kv, 0).unwrap();
+        //     let kvpair = unsafe { &*(result as *mut KVPair) };
+        //     assert_eq!(kvpair.value.as_slice(), kv);
+        //     unsafe {
+        //         let _ = Box::from_raw(result);
+        //     }
+        // }
     }
 
     #[test]
