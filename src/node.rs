@@ -423,8 +423,9 @@ impl Node {
     }
 }
 
+// todo: remove this pub (and Node4's pub)
 impl Node {
-    fn make_node4() -> *mut Node4 {
+    pub fn make_node4() -> *mut Node4 {
         Box::into_raw(Box::new(Node4::new()))
     }
 }
@@ -447,11 +448,15 @@ impl KVPair {
     pub fn new(key: Vec<u8>, value: Vec<u8>) -> Self {
         Self { key, value }
     }
+
+    pub fn into_raw(self) -> *mut KVPair {
+        Box::into_raw(Box::new(self))
+    }
 }
 
 #[repr(C)]
 #[derive(Debug)]
-struct Node4 {
+pub struct Node4 {
     header: Header,
     rc: NodeRef<Node4>,
     leaf: AtomicPtr<usize>,
@@ -1040,8 +1045,9 @@ mod test {
         let mut answer = HashMap::new();
         for kv in &kvs {
             debug_print_atomic(&root);
-            let kvpair = KVPair::new(kv.to_owned(), kv.to_owned());
-            let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            // let kvpair = KVPair::new(kv.to_owned(), kv.to_owned());
+            // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            let kvpair_ptr = KVPair::new(kv.to_owned(), kv.to_owned()).into_raw();
             answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
             Node::insert(&root, &kv, kvpair_ptr, 0).unwrap();
         }
@@ -1077,8 +1083,9 @@ mod test {
         let mut answer = HashMap::new();
         for kv in &kvs {
             debug_print_atomic(&root);
-            let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
-            let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            // let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
+            // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            let kvpair_ptr = KVPair::new(kv.to_vec(), kv.to_vec()).into_raw();
             answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
             Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
         }
@@ -1117,8 +1124,9 @@ mod test {
         let mut answer = HashMap::new();
         for kv in &kvs {
             debug_print_atomic(&root);
-            let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
-            let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            // let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
+            // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            let kvpair_ptr = KVPair::new(kv.to_vec(), kv.to_vec()).into_raw();
             answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
             Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
         }
@@ -1154,8 +1162,9 @@ mod test {
 
         let mut answer = HashMap::new();
         for k in &kvs {
-            let kvpair = KVPair::new(k.to_vec(), k.to_vec());
-            let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            // let kvpair = KVPair::new(k.to_vec(), k.to_vec());
+            // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+            let kvpair_ptr = KVPair::new(k.to_vec(), k.to_vec()).into_raw();
             answer.insert(k.to_owned(), kvpair_ptr as *mut usize);
             Node::insert(&root, k, kvpair_ptr, 0).unwrap();
         }
