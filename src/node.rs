@@ -23,8 +23,9 @@ impl Node {
             header.prefix[i] = key[i];
         }
         let kvpair = KVPair::new(key.to_owned(), value.to_owned());
-        let kvpair_ptr = Box::into_raw(Box::new(kvpair)) as usize + 1;
-        Self::add_child(node, key[key.len() - 1], kvpair_ptr as *mut usize);
+        // let kvpair_ptr = Box::into_raw(Box::new(kvpair)) as usize + 1;
+        let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+        Self::add_child(node, key[key.len() - 1], kvpair_ptr as *mut usize, true);
     }
 
     pub fn search<'a>(node: &'a AtomicPtr<usize>, key: &[u8], depth: usize) -> Option<*mut usize> {
@@ -92,7 +93,7 @@ impl Node {
                 let new_inner_node = &mut *(new_inner_node_ptr as *mut Node4);
                 new_inner_node.leaf.store(node.load(Relaxed), Relaxed);
                 let tmp_atomic = AtomicPtr::new(new_inner_node_ptr); // todo: remove this
-                Self::add_child(&tmp_atomic, *key.last().unwrap(), leaf as *mut usize);
+                Self::add_child(&tmp_atomic, *key.last().unwrap(), leaf as *mut usize, true);
                 // swap
                 node.store(new_inner_node_ptr, Relaxed);
                 return Ok(());
@@ -120,11 +121,13 @@ impl Node {
                     &new_inner_node,
                     key[depth + p as usize],
                     leaf as *const usize,
+                    true,
                 );
                 Self::add_child(
                     &new_inner_node,
                     node_prefix[p as usize],
                     node_substitute_ptr as *mut usize,
+                    false,
                 );
 
                 node.store(new_inner_node.load(Relaxed) as *mut usize, Relaxed);
@@ -139,8 +142,8 @@ impl Node {
                 if Self::is_overflow(node) {
                     Self::grow(&node);
                 }
-                let new_leaf_node = Self::make_new_leaf(key, leaf, depth + 1);
-                Self::add_child(node, key[depth], new_leaf_node);
+                let (new_leaf_node, is_kvpair) = Self::make_new_leaf(key, leaf, depth + 1);
+                Self::add_child(node, key[depth], new_leaf_node, is_kvpair);
             }
             return Ok(());
         }
@@ -289,8 +292,9 @@ impl Node {
     }
 
     // todo: SIMD
-    fn add_child(node_ptr: &AtomicPtr<usize>, key_byte: u8, child: *const usize) {
+    fn add_child(node_ptr: &AtomicPtr<usize>, key_byte: u8, child: *const usize, is_kvpair: bool) {
         assert!(!Self::is_kvpair(node_ptr));
+        let child = (child as usize + is_kvpair as usize) as *const usize;
 
         unsafe {
             match Self::get_header(node_ptr).node_type {
@@ -393,10 +397,13 @@ impl Node {
         node.store(shrunk, Relaxed);
     }
 
-    fn make_new_leaf(key: &[u8], leaf: *mut KVPair, depth: usize) -> *mut usize {
+    // make a new leaf node. if depth is equal to key length, return `leaf` in in_param,
+    // with a boolean flag to identify it type is `KVPair`. otherwise create a inner node
+    // and add `leaf` to its child field.
+    fn make_new_leaf(key: &[u8], leaf: *mut KVPair, depth: usize) -> (*mut usize, bool) {
         // needn't to wrap a Node4
         if key.len() == depth {
-            return leaf as *mut usize;
+            return (leaf as *mut usize, true);
         }
 
         let new_leaf = Self::make_node4();
@@ -408,11 +415,11 @@ impl Node {
                 header.prefix[i] = key[i + depth];
             }
             (*new_leaf).key[0].store(key[depth], Relaxed);
-            (*new_leaf).child[0].store(leaf as *mut usize, Relaxed);
+            (*new_leaf).child[0].store((leaf as usize + 1) as *mut usize, Relaxed);
             (*new_leaf).mask.store(1, Relaxed);
             (*new_leaf).usued.store(1, Relaxed);
         }
-        new_leaf as *mut usize
+        (new_leaf as *mut usize, false)
     }
 }
 
@@ -514,13 +521,18 @@ impl Node4 {
                 .copy_from(fulled_node as *const Node4 as *mut usize);
 
             // key & child field
+            let mask = fulled_node.mask.load(Relaxed);
+            let mut cnt = 0;
             for i in 0..4 {
-                (*new_node).key[i].store(fulled_node.key[i].load(Relaxed), Relaxed);
-                (*new_node).child[i].store(fulled_node.child[i].load(Relaxed), Relaxed);
+                if mask >> i & 1 == 1 {
+                    (*new_node).key[cnt].store(fulled_node.key[i].load(Relaxed), Relaxed);
+                    (*new_node).child[cnt].store(fulled_node.child[i].load(Relaxed), Relaxed);
+                    cnt += 1;
+                }
             }
-
-            (*new_node).usued.store(4, Relaxed);
-            (*new_node).mask.store(1 << 5 - 1, Relaxed);
+            debug_assert_eq!(fulled_node.usued.load(Relaxed) as usize, cnt);
+            (*new_node).usued.store(cnt as u8, Relaxed);
+            (*new_node).mask.store((1 << cnt + 1) - 1, Relaxed);
         }
 
         new_node as *mut usize
@@ -620,10 +632,17 @@ impl Node16 {
                 .copy_from(fulled_node as *const Node16 as *mut usize);
 
             // key & child field
+            let mask = fulled_node.mask.load(Relaxed);
+            let mut cnt = 0;
             for i in 0..16 {
-                (*new_node).child[i].store(fulled_node.child[i].load(Relaxed), Relaxed);
-                (*new_node).key[fulled_node.key[i].load(Relaxed) as usize].store(i as i8, Relaxed);
+                if mask >> i & 1 == 1 {
+                    (*new_node).child[cnt].store(fulled_node.child[i].load(Relaxed), Relaxed);
+                    (*new_node).key[fulled_node.key[cnt].load(Relaxed) as usize]
+                        .store(i as i8, Relaxed);
+                    cnt += 1;
+                }
             }
+            debug_assert_eq!(fulled_node.usued.load(Relaxed) as usize, cnt);
         }
 
         new_node as *mut usize
@@ -646,9 +665,9 @@ impl Node16 {
                     cnt += 1;
                 }
             }
-            (*new_node).usued.store(3, Relaxed);
-            (*new_node).mask.store((1 << 3) - 1, Relaxed);
-            assert_eq!(cnt, 3);
+            (*new_node).usued.store(cnt as u8, Relaxed);
+            (*new_node).mask.store((1 << cnt) - 1, Relaxed);
+            assert!(cnt < 4);
         }
 
         new_node as *mut usize
@@ -778,9 +797,10 @@ impl Node48 {
                     cnt += 1;
                 }
             }
-            (*new_node).usued.store(15, Relaxed);
-            (*new_node).mask.store((1 << 15) - 1, Relaxed);
-            assert_eq!(cnt, 15);
+            (*new_node).usued.store(cnt as u8, Relaxed);
+            (*new_node).mask.store((1 << cnt) - 1, Relaxed);
+            assert!(cnt < 16);
+            debug_assert_eq!(cnt, (*new_node).header.count as usize);
         }
 
         new_node as *mut usize
@@ -862,7 +882,7 @@ impl Node256 {
                     cnt += 1;
                 }
             }
-            assert_eq!(cnt, 47);
+            assert!(cnt < 48);
         }
 
         new_node as *mut usize
@@ -952,8 +972,7 @@ mod test {
     use std::collections::HashMap;
 
     fn empty_node4() -> *mut Node4 {
-        let node = Node::make_node4();
-        node
+        Node::make_node4()
     }
 
     fn debug_print(node_ptr: *mut usize) {
@@ -983,6 +1002,7 @@ mod test {
         debug_print(node.load(Relaxed));
     }
 
+    // todo: maybe remove this? needn't a specific `init()` call
     #[test]
     fn init() {
         let root = AtomicPtr::new(empty_node4() as *mut usize);
@@ -991,6 +1011,23 @@ mod test {
         debug!("header: {:?}", header);
         let result = Node::search(&root, &[1, 2, 3, 4], 0);
         debug!("result kvpair: {:?}", result.unwrap());
+    }
+
+    // todo: fix and remove ignore
+    #[test]
+    #[ignore]
+    fn test_simple_from_ground() {
+        let root = AtomicPtr::new(ptr::null::<*const usize>() as *mut usize);
+        let kvpair = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec());
+        let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+        Node::insert(&root, &[1, 2, 3, 4], kvpair_ptr, 0).unwrap();
+
+        let kvpair = KVPair::new([1, 2, 3, 4, 5].to_vec(), [1, 2, 3, 4, 5].to_vec());
+        let kvpair_ptr = Box::into_raw(Box::new(kvpair));
+        Node::insert(&root, &[1, 2, 3, 4, 5], kvpair_ptr, 0).unwrap();
+
+        Node::search(&root, &[1, 2, 3, 4], 0).unwrap();
+        Node::search(&root, &[1, 2, 3, 4, 5], 0).unwrap();
     }
 
     #[test]
@@ -1006,7 +1043,6 @@ mod test {
             let kvpair = KVPair::new(kv.to_owned(), kv.to_owned());
             let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
-            let kvpair_ptr = (kvpair_ptr as usize + 1) as *mut KVPair;
             Node::insert(&root, &kv, kvpair_ptr, 0).unwrap();
         }
 
@@ -1044,7 +1080,6 @@ mod test {
             let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
             let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
-            let kvpair_ptr = (kvpair_ptr as usize + 1) as *mut KVPair;
             Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
         }
 
@@ -1085,7 +1120,6 @@ mod test {
             let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
             let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
-            let kvpair_ptr = (kvpair_ptr as usize + 1) as *mut KVPair;
             Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
         }
 
@@ -1093,6 +1127,16 @@ mod test {
         for kv in &kvs {
             let result = Node::search(&root, kv, 0);
             assert_eq!(result.unwrap(), *answer.get(kv).unwrap());
+        }
+
+        // remove
+        for kv in &kvs {
+            let result = Node::remove(&root, kv, 0).unwrap();
+            let kvpair = unsafe { &*(result as *mut KVPair) };
+            assert_eq!(&kvpair.value, kv);
+            unsafe {
+                let _ = Box::from_raw(result);
+            }
         }
     }
 
@@ -1113,7 +1157,6 @@ mod test {
             let kvpair = KVPair::new(k.to_vec(), k.to_vec());
             let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             answer.insert(k.to_owned(), kvpair_ptr as *mut usize);
-            let kvpair_ptr = (kvpair_ptr as usize + 1) as *mut KVPair;
             Node::insert(&root, k, kvpair_ptr, 0).unwrap();
         }
 
