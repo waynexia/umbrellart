@@ -1,3 +1,4 @@
+use crate::utils::NodePtr;
 use std::alloc::{dealloc, Layout};
 #[allow(unused_variables)]
 use std::fmt::Debug;
@@ -28,7 +29,7 @@ impl Node {
         Self::add_child(node, key[key.len() - 1], kvpair_ptr as *mut usize, true);
     }
 
-    pub fn search<'a>(node: &'a NodePtr, key: &[u8], depth: usize) -> Option<*mut usize> {
+    pub fn search(node: NodePtr, key: &[u8], depth: usize) -> Option<*mut usize> {
         if node.load().is_null() {
             info!("search encounted a null ptr");
             return None;
@@ -36,11 +37,11 @@ impl Node {
         // lazy expansion
         // run out of key bytes, should reach leaf node
         if depth == key.len() {
-            if Self::is_leaf_match(node, key) {
-                if Self::is_kvpair(node) {
+            if Self::is_leaf_match(&node, key) {
+                if Self::is_kvpair(&node) {
                     return Some(node.load());
                 } else {
-                    let leaf = Self::to_node4(node).leaf.load();
+                    let leaf = Self::to_node4(&node).leaf.load();
                     return if !leaf.is_null() {
                         Some((leaf as usize - 1) as *mut usize)
                     } else {
@@ -52,18 +53,18 @@ impl Node {
             return None;
         }
         // check compressed path pessimistically
-        if Self::check_prefix(node, key, depth) != Self::get_prefix_len(node) {
+        if Self::check_prefix(&node, key, depth) != Self::get_prefix_len(&node) {
             debug!(
                 "prefix not match, {} != {}",
-                Self::check_prefix(node, key, depth),
-                Self::get_prefix_len(node)
+                Self::check_prefix(&node, key, depth),
+                Self::get_prefix_len(&node)
             );
             return None;
         }
         // step
-        let depth = depth + Self::get_prefix_len(node) as usize;
-        let next = Self::find_child(node, &key[depth])?;
-        let _next_ref = next.refer();
+        let depth = depth + Self::get_prefix_len(&node) as usize;
+        let next = Self::find_child(&node, &key[depth])?;
+        // let _next_ref = next.refer();
         // another lazy expansion?
         if Node::is_kvpair(next) {
             if Node::is_leaf_match(next, key) {
@@ -71,16 +72,11 @@ impl Node {
             }
             return None;
         }
-        return Self::search(next, key, depth + 1);
+        return Self::search(next.clone(), key, depth + 1);
     }
 
     // leaf pointer is tagged
-    pub fn insert<'a>(
-        node: &'a NodePtr,
-        key: &[u8],
-        leaf: *mut KVPair,
-        depth: usize,
-    ) -> Result<(), ()> {
+    pub fn insert(node: NodePtr, key: &[u8], leaf: *mut KVPair, depth: usize) -> Result<(), ()> {
         if node.load().is_null() {
             node.store(leaf as *mut usize);
             return Ok(());
@@ -88,20 +84,23 @@ impl Node {
         unsafe {
             // reached a kvpair node. replace it by a inner node, move kvpair to `leaf` and add 1 child.
             // this happens when old key is substring of new key.
-            if Self::is_kvpair(node) {
-                let new_inner_node_ptr = Self::make_node4() as *mut usize;
+            if Self::is_kvpair(&node) {
+                let new_inner_node_ptr = Self::make_node4();
                 // maybe no prefix? Todo: check this
-                let new_inner_node = &mut *(new_inner_node_ptr as *mut Node4);
-                new_inner_node.leaf.store(node.load());
-                let tmp_atomic = NodePtr::new(new_inner_node_ptr); // todo: remove this
+                let new_inner_node = &mut *(new_inner_node_ptr);
+                // new_inner_node.leaf.store(node.load());
+                new_inner_node.leaf.replace(node.clone());
+                let tmp_atomic = NodePtr::new(new_inner_node_ptr as *mut usize); // todo: remove this
                 Self::add_child(&tmp_atomic, *key.last().unwrap(), leaf as *mut usize, true);
                 // swap
-                node.store(new_inner_node_ptr);
+                node.swap(tmp_atomic);
+                // node.replace(tmp_atomic);
+
                 return Ok(());
             }
-            let p = Self::check_prefix(node, key, depth);
+            let p = Self::check_prefix(&node, key, depth);
             // todo: remove hard coded "Node4"
-            if p != Self::get_prefix_len(node) {
+            if p != Self::get_prefix_len(&node) {
                 // make a copy of node and modify it,
                 // construct new inner node and replace node
                 let mut node_substitute: Node4 =
@@ -110,7 +109,7 @@ impl Node {
                 let node_substitute_ptr = Box::into_raw(Box::new(node_substitute));
 
                 let new_inner_node = NodePtr::new(Self::make_node4() as *mut usize);
-                let node_prefix = Self::get_header(node).prefix;
+                let node_prefix = Self::get_header(&node).prefix;
                 let header = Self::get_header_mut(new_inner_node.load());
                 header.prefix_len = p;
                 Self::get_header_mut(new_inner_node.load() as *mut usize).prefix_len = p;
@@ -131,55 +130,58 @@ impl Node {
                     false,
                 );
 
-                node.store(new_inner_node.load() as *mut usize);
-                new_inner_node.increase_counter();
+                // node.store(new_inner_node.load() as *mut usize);
+                // new_inner_node.increase_counter();
                 // todo: drop old ptr, maybe call `obsolate` here?
+                node.swap(new_inner_node);
                 return Ok(());
             }
 
-            let depth = depth + Self::get_prefix_len(node) as usize;
-            if let Some(next_node) = Self::find_child(node, &key[depth]) {
-                Self::insert(next_node, key, leaf, depth + 1)?;
+            let depth = depth + Self::get_prefix_len(&node) as usize;
+            if let Some(next_node) = Self::find_child(&node, &key[depth]) {
+                Self::insert(next_node.clone(), key, leaf, depth + 1)?;
+                println!("{:?}", next_node);
             } else {
-                if Self::is_overflow(node) {
+                if Self::is_overflow(&node) {
+                    // todo: ref or value
                     Self::grow(&node);
                 }
                 let (new_leaf_node, is_kvpair) = Self::make_new_leaf(key, leaf, depth + 1);
-                Self::add_child(node, key[depth], new_leaf_node, is_kvpair);
+                Self::add_child(&node, key[depth], new_leaf_node, is_kvpair);
             }
             return Ok(());
         }
     }
 
-    pub fn remove<'a>(node: &'a NodePtr, key: &[u8], depth: usize) -> Option<*mut usize> {
+    pub fn remove(node: NodePtr, key: &[u8], depth: usize) -> Option<*mut usize> {
         if node.load().is_null() {
             return None;
         }
-        if Self::is_kvpair(node) {
+        if Self::is_kvpair(&node) {
             unreachable!("will not reach kvpair");
         }
         // need check `leaf` field
         if depth == key.len() {
-            let leaf = &Self::to_node4(node).leaf;
+            let leaf = &Self::to_node4(&node).leaf;
             if Self::is_leaf_match(leaf, key) {
-                let ret = leaf.swap(ptr::null::<*const usize>() as *mut usize);
+                let ret = leaf.atomic_swap(ptr::null::<*const usize>() as *mut usize);
                 return Some((ret as usize - 1) as *mut usize);
             } else {
                 return None;
             }
         }
 
-        if Self::check_prefix(node, key, depth) != Self::get_prefix_len(node) {
+        if Self::check_prefix(&node, key, depth) != Self::get_prefix_len(&node) {
             return None;
         }
-        let depth = depth + Self::get_prefix_len(node) as usize;
-        let next = Self::find_child(node, &key[depth])?;
+        let depth = depth + Self::get_prefix_len(&node) as usize;
+        let next = Self::find_child(&node, &key[depth])?;
         if Node::is_kvpair(next) {
             if Node::is_leaf_match(next, key) {
-                if Self::is_underflow(node) {
-                    Self::shrink(node);
+                if Self::is_underflow(&node) {
+                    Self::shrink(&node);
                 }
-                let removed = Self::remove_child(node, key[depth]);
+                let removed = Self::remove_child(&node, key[depth]);
                 if Self::is_kvpair(&NodePtr::new(removed as *mut usize)) {
                     let raw_ptr = (removed as usize - 1) as *mut KVPair;
                     return Some(raw_ptr as *mut usize);
@@ -188,12 +190,14 @@ impl Node {
             return None;
         }
 
-        let ret = Self::remove(next, key, depth + 1);
+        let ret = Self::remove(next.clone(), key, depth + 1);
 
         // downgrade empty inner node to its `leaf`
         if Self::get_header(next).count == 0 {
-            let leaf = &Self::to_node4(node).leaf;
-            next.store(leaf.load());
+            let leaf = &Self::to_node4(&node).leaf;
+            // next.store(leaf.load());
+            next.swap(leaf.clone());
+            // next.replace(leaf.clone());
         }
 
         ret
@@ -464,7 +468,7 @@ impl KVPair {
 #[repr(C)]
 #[derive(Debug)]
 pub struct Node4 {
-    header: Header,
+    pub header: Header,
     leaf: NodePtr,
     // mark keys exist or not in bits
     mask: AtomicU8,
@@ -558,7 +562,7 @@ impl Node4 {
         for i in 0..4 {
             if mask >> i & 1 == 1 && self.key[i].load(Relaxed) == key {
                 self.mask.store(mask - (1 << i), Relaxed);
-                return self.child[i].swap(ptr::null::<usize>() as *mut usize);
+                return self.child[i].atomic_swap(ptr::null_mut::<usize>());
             }
         }
         unreachable!("key must exist")
@@ -567,17 +571,32 @@ impl Node4 {
 
 impl Drop for Node4 {
     fn drop(&mut self) {
+        // drop leaf
+        let ptr = self.leaf.load();
+        if !ptr.is_null() {
+            let ptr = (ptr as usize - 1) as *mut KVPair;
+            unsafe {
+                let _ = Box::from_raw(ptr);
+            }
+        }
         for i in 0..4 {
             let ptr = self.child[i].load();
             if ptr.is_null() {
-                return;
+                continue;
             }
 
-            if self.child[i].get_type() == NodeType::KVPair {
-                let ptr = (ptr as usize - 1) as *mut KVPair;
-                unsafe {
-                    let _ = Box::from_raw(ptr);
+            match self.child[i].get_type() {
+                NodeType::KVPair => {
+                    let ptr = (ptr as usize - 1) as *mut KVPair;
+                    unsafe {
+                        let _ = Box::from_raw(ptr);
+                    }
                 }
+                NodeType::Node4 => {
+                    let child = self.child[i].clone();
+                    // child.drop();
+                }
+                _ => continue,
             }
         }
     }
@@ -585,7 +604,7 @@ impl Drop for Node4 {
 
 #[repr(C)]
 #[derive(Debug)]
-struct Node16 {
+pub struct Node16 {
     header: Header,
     leaf: NodePtr,
     mask: AtomicU16,
@@ -706,7 +725,7 @@ impl Node16 {
             if mask >> i & 1 == 1 && self.key[i].load(Relaxed) == key {
                 // todo: fix this
                 self.mask.store(mask - (1 << i), Relaxed);
-                return self.child[i].swap(ptr::null_mut());
+                return self.child[i].atomic_swap(ptr::null_mut());
             }
         }
         unreachable!("key must exist")
@@ -715,7 +734,7 @@ impl Node16 {
 
 #[repr(C)]
 #[derive(Debug)]
-struct Node48 {
+pub struct Node48 {
     header: Header,
     leaf: NodePtr,
     // Stores child index, negative means not exist
@@ -818,13 +837,13 @@ impl Node48 {
         self.header.count -= 1;
 
         let pos = self.key[key as usize].swap(-1, Relaxed);
-        self.child[pos as usize].swap(ptr::null_mut())
+        self.child[pos as usize].atomic_swap(ptr::null_mut())
     }
 }
 
 #[repr(C)]
 #[derive(Debug)]
-struct Node256 {
+pub struct Node256 {
     header: Header,
     leaf: NodePtr,
     child: [NodePtr; 256],
@@ -889,119 +908,14 @@ impl Node256 {
 
     pub fn remove_child(&mut self, key: u8) -> *mut usize {
         self.header.count -= 1;
-        self.child[key as usize].swap(ptr::null_mut())
-    }
-}
-
-#[derive(Debug)]
-pub struct NodePtr {
-    ptr: AtomicPtr<usize>,
-    count: AtomicUsize,
-}
-
-impl NodePtr {
-    fn new(ptr: *mut usize) -> Self {
-        Self {
-            ptr: AtomicPtr::new(ptr),
-            count: AtomicUsize::new(1),
-        }
-    }
-
-    fn clone(&self) -> Self {
-        todo!()
-    }
-
-    unsafe fn obsolate(&self) {
-        let cnt = self.count.fetch_sub(1, Relaxed);
-        assert!(cnt > 0);
-    }
-
-    fn store(&self, ptr: *mut usize) {
-        self.ptr.store(ptr, Relaxed);
-    }
-
-    fn load(&self) -> *mut usize {
-        self.ptr.load(Relaxed)
-    }
-
-    fn swap(&self, ptr: *mut usize) -> *mut usize {
-        self.ptr.swap(ptr, Relaxed)
-    }
-
-    fn get_type(&self) -> NodeType {
-        let ptr = self.ptr.load(Relaxed);
-        if (ptr as usize) & 1 == 1 {
-            NodeType::KVPair
-        } else {
-            unsafe { (*(ptr as *mut Node4)).header.node_type }
-        }
-    }
-
-    fn refer(&self) -> NodeRef {
-        NodeRef { ptr_ref: &self }
-    }
-
-    // Manually increase strong counter by one.
-    // Usually when creating a new inner node to replace an old one, atomic store
-    // is called instead of "move". which will lead to a `drop` call and decrease
-    // counter. In that situation needs to invoke this method to balance that `drop` call.
-    fn increase_counter(&self) {
-        self.count.fetch_add(1, Relaxed);
-    }
-}
-
-impl Drop for NodePtr {
-    fn drop(&mut self) {
-        let cnt = self.count.fetch_sub(1, Relaxed);
-        if cnt == 1 {
-            let ptr = self.load();
-            if ptr.is_null() {
-                return;
-            }
-            println!("going to drop a NodePtr");
-
-            match self.get_type() {
-                NodeType::Node4 => unsafe {
-                    let _ = Box::from_raw(ptr as *mut Node4);
-                },
-                NodeType::Node16 => unsafe {
-                    let _ = Box::from_raw(ptr as *mut Node16);
-                },
-                NodeType::Node48 => unsafe {
-                    let _ = Box::from_raw(ptr as *mut Node48);
-                },
-                NodeType::Node256 => unsafe {
-                    let _ = Box::from_raw(ptr as *mut Node256);
-                },
-                NodeType::KVPair => return,
-            }
-        }
-    }
-}
-
-impl Default for NodePtr {
-    fn default() -> Self {
-        Self {
-            ptr: AtomicPtr::new(ptr::null_mut::<usize>()),
-            count: AtomicUsize::new(1),
-        }
-    }
-}
-
-struct NodeRef<'a> {
-    ptr_ref: &'a NodePtr,
-}
-
-impl<'a> Drop for NodeRef<'a> {
-    fn drop(&mut self) {
-        self.ptr_ref.count.fetch_sub(1, Relaxed);
+        self.child[key as usize].atomic_swap(ptr::null_mut())
     }
 }
 
 #[derive(Clone, Debug)]
 #[repr(C)]
-struct Header {
-    node_type: NodeType,
+pub struct Header {
+    pub node_type: NodeType,
     // item count
     // todo: change `count` to u8
     count: u16,
@@ -1073,8 +987,33 @@ mod test {
         Node::init(&root, &[1, 2, 3, 4], &[1, 2, 3, 4]);
         let header = Node::get_header(&root);
         debug!("header: {:?}", header);
-        let result = Node::search(&root, &[1, 2, 3, 4], 0);
+        let result = Node::search(root.clone(), &[1, 2, 3, 4], 0);
         debug!("result kvpair: {:?}", result.unwrap());
+    }
+
+    #[test]
+    fn test_create_node() {
+        let root = NodePtr::new(empty_node4() as *mut usize);
+    }
+
+    #[test]
+    fn test_insert_one() {
+        let root = NodePtr::new(empty_node4() as *mut usize);
+        Node::init(&root, &[1, 2, 3, 4], &[1, 2, 3, 4]);
+
+        let kv = vec![1, 2, 3, 4, 5];
+        let kvpair_ptr = KVPair::new(kv.to_owned(), kv.to_owned()).into_raw();
+        Node::insert(root.clone(), &kv, kvpair_ptr, 0).unwrap();
+
+        // let result = Node::remove(root.clone(), &kv, 0).unwrap();
+        // unsafe {
+        //     let _ = Box::from_raw(result as *mut KVPair);
+        // }
+
+        // let result = Node::remove(&root, &kv, 0).unwrap();
+        // unsafe {
+        //     let _ = Box::from_raw(result as *mut KVPair);
+        // }
     }
 
     // todo: fix and remove ignore
@@ -1084,14 +1023,14 @@ mod test {
         let root = NodePtr::new(ptr::null::<*const usize>() as *mut usize);
         let kvpair = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec());
         let kvpair_ptr = Box::into_raw(Box::new(kvpair));
-        Node::insert(&root, &[1, 2, 3, 4], kvpair_ptr, 0).unwrap();
+        Node::insert(root.clone(), &[1, 2, 3, 4], kvpair_ptr, 0).unwrap();
 
         let kvpair = KVPair::new([1, 2, 3, 4, 5].to_vec(), [1, 2, 3, 4, 5].to_vec());
         let kvpair_ptr = Box::into_raw(Box::new(kvpair));
-        Node::insert(&root, &[1, 2, 3, 4, 5], kvpair_ptr, 0).unwrap();
+        Node::insert(root.clone(), &[1, 2, 3, 4, 5], kvpair_ptr, 0).unwrap();
 
-        Node::search(&root, &[1, 2, 3, 4], 0).unwrap();
-        Node::search(&root, &[1, 2, 3, 4, 5], 0).unwrap();
+        Node::search(root.clone(), &[1, 2, 3, 4], 0).unwrap();
+        Node::search(root.clone(), &[1, 2, 3, 4, 5], 0).unwrap();
     }
 
     #[test]
@@ -1108,18 +1047,18 @@ mod test {
             // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             let kvpair_ptr = KVPair::new(kv.to_owned(), kv.to_owned()).into_raw();
             answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
-            Node::insert(&root, &kv, kvpair_ptr, 0).unwrap();
+            Node::insert(root.clone(), &kv, kvpair_ptr, 0).unwrap();
         }
 
         // search
         for kv in &kvs {
-            let result = Node::search(&root, kv, 0).unwrap();
+            let result = Node::search(root.clone(), kv, 0).unwrap();
             assert_eq!(result, *answer.get(kv).unwrap());
         }
 
         //remove
         for kv in kvs {
-            let result = Node::remove(&root, &kv, 0).unwrap();
+            let result = Node::remove(root.clone(), &kv, 0).unwrap();
             let kvpair = unsafe { &*(result as *mut KVPair) };
             assert_eq!(kvpair.value.as_slice(), kv);
             unsafe {
@@ -1146,18 +1085,18 @@ mod test {
             // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             let kvpair_ptr = KVPair::new(kv.to_vec(), kv.to_vec()).into_raw();
             answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
-            Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
+            Node::insert(root.clone(), kv, kvpair_ptr, 0).unwrap();
         }
 
         // search
         for kv in &kvs {
-            let result = Node::search(&root, kv, 0);
+            let result = Node::search(root.clone(), kv, 0);
             assert_eq!(result.unwrap(), *answer.get(kv).unwrap());
         }
 
         //remove
         for kv in &kvs {
-            let result = Node::remove(&root, kv, 0).unwrap();
+            let result = Node::remove(root.clone(), kv, 0).unwrap();
             let kvpair = unsafe { &*(result as *mut KVPair) };
             assert_eq!(kvpair.value.as_slice(), kv);
             unsafe {
@@ -1187,18 +1126,18 @@ mod test {
             // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             let kvpair_ptr = KVPair::new(kv.to_vec(), kv.to_vec()).into_raw();
             answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
-            Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
+            Node::insert(root.clone(), kv, kvpair_ptr, 0).unwrap();
         }
 
         // search
         for kv in &kvs {
-            let result = Node::search(&root, kv, 0);
+            let result = Node::search(root.clone(), kv, 0);
             assert_eq!(result.unwrap(), *answer.get(kv).unwrap());
         }
 
         // remove
         for kv in &kvs {
-            let result = Node::remove(&root, kv, 0).unwrap();
+            let result = Node::remove(root.clone(), kv, 0).unwrap();
             let kvpair = unsafe { &*(result as *mut KVPair) };
             assert_eq!(&kvpair.value, kv);
             unsafe {
@@ -1225,17 +1164,17 @@ mod test {
             // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             let kvpair_ptr = KVPair::new(k.to_vec(), k.to_vec()).into_raw();
             answer.insert(k.to_owned(), kvpair_ptr as *mut usize);
-            Node::insert(&root, k, kvpair_ptr, 0).unwrap();
+            Node::insert(root.clone(), k, kvpair_ptr, 0).unwrap();
         }
 
         for k in &kvs {
-            let result = Node::search(&root, k, 0);
+            let result = Node::search(root.clone(), k, 0);
             assert_eq!(result.unwrap(), *answer.get(k).unwrap());
         }
 
         // remove
         for kv in &kvs {
-            let result = Node::remove(&root, kv, 0).unwrap();
+            let result = Node::remove(root.clone(), kv, 0).unwrap();
             let kvpair = unsafe { &*(result as *mut KVPair) };
             assert_eq!(&kvpair.value, kv);
             unsafe {
