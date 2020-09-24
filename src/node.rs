@@ -4,7 +4,7 @@ use std::fmt::Debug;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::atomic::{AtomicI8, AtomicPtr, AtomicU16, AtomicU8};
+use std::sync::atomic::{AtomicI8, AtomicPtr, AtomicU16, AtomicU8, AtomicUsize};
 use std::sync::Arc;
 
 use log::{debug, info};
@@ -15,8 +15,8 @@ const MAX_PREFIX_STORED: usize = 10;
 pub struct Node {}
 
 impl Node {
-    pub fn init(node: &AtomicPtr<usize>, key: &[u8], value: &[u8]) {
-        let mut header = Self::get_header_mut(node.load(Relaxed));
+    pub fn init(node: &NodePtr, key: &[u8], value: &[u8]) {
+        let mut header = Self::get_header_mut(node.load());
         assert!(header.count == 0);
         header.prefix_len = key.len() as u32 - 1;
         for i in 0..(header.prefix_len as usize).min(MAX_PREFIX_STORED) {
@@ -28,8 +28,8 @@ impl Node {
         Self::add_child(node, key[key.len() - 1], kvpair_ptr as *mut usize, true);
     }
 
-    pub fn search<'a>(node: &'a AtomicPtr<usize>, key: &[u8], depth: usize) -> Option<*mut usize> {
-        if node.load(Relaxed).is_null() {
+    pub fn search<'a>(node: &'a NodePtr, key: &[u8], depth: usize) -> Option<*mut usize> {
+        if node.load().is_null() {
             info!("search encounted a null ptr");
             return None;
         }
@@ -38,9 +38,9 @@ impl Node {
         if depth == key.len() {
             if Self::is_leaf_match(node, key) {
                 if Self::is_kvpair(node) {
-                    return Some(node.load(Relaxed));
+                    return Some(node.load());
                 } else {
-                    let leaf = Self::to_node4(node).leaf.load(Relaxed);
+                    let leaf = Self::to_node4(node).leaf.load();
                     return if !leaf.is_null() {
                         Some((leaf as usize - 1) as *mut usize)
                     } else {
@@ -63,10 +63,11 @@ impl Node {
         // step
         let depth = depth + Self::get_prefix_len(node) as usize;
         let next = Self::find_child(node, &key[depth])?;
+        let _next_ref = next.refer();
         // another lazy expansion?
         if Node::is_kvpair(next) {
             if Node::is_leaf_match(next, key) {
-                return Some((next.load(Relaxed) as usize - 1) as *mut usize);
+                return Some((next.load() as usize - 1) as *mut usize);
             }
             return None;
         }
@@ -75,13 +76,13 @@ impl Node {
 
     // leaf pointer is tagged
     pub fn insert<'a>(
-        node: &'a AtomicPtr<usize>,
+        node: &'a NodePtr,
         key: &[u8],
         leaf: *mut KVPair,
         depth: usize,
     ) -> Result<(), ()> {
-        if node.load(Relaxed).is_null() {
-            node.store(leaf as *mut usize, Relaxed);
+        if node.load().is_null() {
+            node.store(leaf as *mut usize);
             return Ok(());
         }
         unsafe {
@@ -91,11 +92,11 @@ impl Node {
                 let new_inner_node_ptr = Self::make_node4() as *mut usize;
                 // maybe no prefix? Todo: check this
                 let new_inner_node = &mut *(new_inner_node_ptr as *mut Node4);
-                new_inner_node.leaf.store(node.load(Relaxed), Relaxed);
-                let tmp_atomic = AtomicPtr::new(new_inner_node_ptr); // todo: remove this
+                new_inner_node.leaf.store(node.load());
+                let tmp_atomic = NodePtr::new(new_inner_node_ptr); // todo: remove this
                 Self::add_child(&tmp_atomic, *key.last().unwrap(), leaf as *mut usize, true);
                 // swap
-                node.store(new_inner_node_ptr, Relaxed);
+                node.store(new_inner_node_ptr);
                 return Ok(());
             }
             let p = Self::check_prefix(node, key, depth);
@@ -104,15 +105,15 @@ impl Node {
                 // make a copy of node and modify it,
                 // construct new inner node and replace node
                 let mut node_substitute: Node4 =
-                    mem::transmute_copy(&*(node.load(Relaxed) as *const Node4)); // ?
+                    mem::transmute_copy(&*(node.load() as *const Node4)); // ?
                 node_substitute.header.prefix_len = p;
                 let node_substitute_ptr = Box::into_raw(Box::new(node_substitute));
 
-                let new_inner_node = AtomicPtr::new(Self::make_node4() as *mut usize);
+                let new_inner_node = NodePtr::new(Self::make_node4() as *mut usize);
                 let node_prefix = Self::get_header(node).prefix;
-                let header = Self::get_header_mut(new_inner_node.load(Relaxed));
+                let header = Self::get_header_mut(new_inner_node.load());
                 header.prefix_len = p;
-                Self::get_header_mut(new_inner_node.load(Relaxed) as *mut usize).prefix_len = p;
+                Self::get_header_mut(new_inner_node.load() as *mut usize).prefix_len = p;
                 for i in 0..MAX_PREFIX_STORED.min(p as usize) {
                     header.prefix[i] = node_prefix[i];
                 }
@@ -130,8 +131,9 @@ impl Node {
                     false,
                 );
 
-                node.store(new_inner_node.load(Relaxed) as *mut usize, Relaxed);
-                // todo: drop old ptr
+                node.store(new_inner_node.load() as *mut usize);
+                new_inner_node.increase_counter();
+                // todo: drop old ptr, maybe call `obsolate` here?
                 return Ok(());
             }
 
@@ -149,8 +151,8 @@ impl Node {
         }
     }
 
-    pub fn remove<'a>(node: &'a AtomicPtr<usize>, key: &[u8], depth: usize) -> Option<*mut usize> {
-        if node.load(Relaxed).is_null() {
+    pub fn remove<'a>(node: &'a NodePtr, key: &[u8], depth: usize) -> Option<*mut usize> {
+        if node.load().is_null() {
             return None;
         }
         if Self::is_kvpair(node) {
@@ -160,7 +162,7 @@ impl Node {
         if depth == key.len() {
             let leaf = &Self::to_node4(node).leaf;
             if Self::is_leaf_match(leaf, key) {
-                let ret = leaf.swap(ptr::null::<*const usize>() as *mut usize, Relaxed);
+                let ret = leaf.swap(ptr::null::<*const usize>() as *mut usize);
                 return Some((ret as usize - 1) as *mut usize);
             } else {
                 return None;
@@ -178,7 +180,7 @@ impl Node {
                     Self::shrink(node);
                 }
                 let removed = Self::remove_child(node, key[depth]);
-                if Self::is_kvpair(&Arc::new(AtomicPtr::new(removed as *mut usize))) {
+                if Self::is_kvpair(&NodePtr::new(removed as *mut usize)) {
                     let raw_ptr = (removed as usize - 1) as *mut KVPair;
                     return Some(raw_ptr as *mut usize);
                 }
@@ -191,7 +193,7 @@ impl Node {
         // downgrade empty inner node to its `leaf`
         if Self::get_header(next).count == 0 {
             let leaf = &Self::to_node4(node).leaf;
-            next.store(leaf.load(Relaxed), Relaxed);
+            next.store(leaf.load());
         }
 
         ret
@@ -199,12 +201,12 @@ impl Node {
 }
 
 impl Node {
-    fn is_leaf_match(node: &AtomicPtr<usize>, key: &[u8]) -> bool {
+    fn is_leaf_match(node: &NodePtr, key: &[u8]) -> bool {
         if Self::is_kvpair(node) {
             Self::to_kvpair(node).key.as_slice() == key
         } else {
             let leaf = &Self::to_node4(node).leaf;
-            if !leaf.load(Relaxed).is_null() {
+            if !leaf.load().is_null() {
                 Self::to_kvpair(&leaf).key.as_slice() == key
             } else {
                 // assert leaf exist?
@@ -214,27 +216,27 @@ impl Node {
     }
 
     // tagged pointer
-    fn is_kvpair(node: &AtomicPtr<usize>) -> bool {
-        node.load(Relaxed) as usize % 2 == 1
+    fn is_kvpair(node: &NodePtr) -> bool {
+        node.load() as usize % 2 == 1
     }
 
-    fn to_kvpair(node: &AtomicPtr<usize>) -> &KVPair {
-        unsafe { &*((node.load(Relaxed) as usize - 1) as *mut KVPair) }
+    fn to_kvpair(node: &NodePtr) -> &KVPair {
+        unsafe { &*((node.load() as usize - 1) as *mut KVPair) }
     }
 
     // All node struct is order-preserving #[repr(C)]. With Header in the first place
     // and Leaf pointer in the second. This method can only be used to access above two
     // fields when actual type is not specified.
-    fn to_node4(node: &AtomicPtr<usize>) -> &Node4 {
+    fn to_node4(node: &NodePtr) -> &Node4 {
         assert!(!Self::is_kvpair(node));
-        unsafe { &*(node.load(Relaxed) as *mut Node4) }
+        unsafe { &*(node.load() as *mut Node4) }
     }
 
     // Return node.header.prefix_len if match, or 0 if not.
-    fn check_prefix(node: &AtomicPtr<usize>, key: &[u8], depth: usize) -> PrefixCount {
+    fn check_prefix(node: &NodePtr, key: &[u8], depth: usize) -> PrefixCount {
         assert!(!Self::is_kvpair(node));
 
-        let header = unsafe { &*(node.load(Relaxed) as *const Header) };
+        let header = unsafe { &*(node.load() as *const Header) };
         for i in 0..key
             .len()
             .min(header.prefix_len as usize)
@@ -247,44 +249,42 @@ impl Node {
         return header.prefix_len;
     }
 
-    fn get_prefix_len(node: &AtomicPtr<usize>) -> PrefixCount {
+    fn get_prefix_len(node: &NodePtr) -> PrefixCount {
         assert!(!Self::is_kvpair(node));
 
-        unsafe { (*(node.load(Relaxed) as *const Header)).prefix_len }
+        unsafe { (*(node.load() as *const Header)).prefix_len }
     }
 
-    fn find_child<'a>(
-        node_ptr: &'a AtomicPtr<usize>,
-        key_byte: &u8,
-    ) -> Option<&'a AtomicPtr<usize>> {
+    fn find_child<'a>(node_ptr: &'a NodePtr, key_byte: &u8) -> Option<&'a NodePtr> {
         assert!(!Self::is_kvpair(node_ptr));
 
         unsafe {
             match Self::get_header(node_ptr).node_type {
                 NodeType::Node4 => {
-                    let node = node_ptr.load(Relaxed) as *const Node4;
+                    let node = node_ptr.load() as *const Node4;
                     (*node).find_child(key_byte)
                 }
                 NodeType::Node16 => {
-                    let node = node_ptr.load(Relaxed) as *const Node16;
+                    let node = node_ptr.load() as *const Node16;
                     (*node).find_child(key_byte)
                 }
                 NodeType::Node48 => {
-                    let node = node_ptr.load(Relaxed) as *const Node48;
+                    let node = node_ptr.load() as *const Node48;
                     (*node).find_child(key_byte)
                 }
                 NodeType::Node256 => {
-                    let node = node_ptr.load(Relaxed) as *const Node256;
+                    let node = node_ptr.load() as *const Node256;
                     (*node).find_child(key_byte)
                 }
+                NodeType::KVPair => unreachable!(),
             }
         }
     }
 
-    fn get_header(node: &AtomicPtr<usize>) -> &Header {
+    fn get_header(node: &NodePtr) -> &Header {
         assert!(!Self::is_kvpair(node));
 
-        unsafe { &*(node.load(Relaxed) as *const Header) }
+        unsafe { &*(node.load() as *const Header) }
     }
 
     fn get_header_mut<'a>(node: *mut usize) -> &'a mut Header {
@@ -292,53 +292,55 @@ impl Node {
     }
 
     // todo: SIMD
-    fn add_child(node_ptr: &AtomicPtr<usize>, key_byte: u8, child: *const usize, is_kvpair: bool) {
+    fn add_child(node_ptr: &NodePtr, key_byte: u8, child: *const usize, is_kvpair: bool) {
         assert!(!Self::is_kvpair(node_ptr));
         let child = (child as usize + is_kvpair as usize) as *const usize;
 
         unsafe {
             match Self::get_header(node_ptr).node_type {
                 NodeType::Node4 => {
-                    let node = node_ptr.load(Relaxed) as *mut Node4;
+                    let node = node_ptr.load() as *mut Node4;
                     (*node).add_child(key_byte, child)
                 }
                 NodeType::Node16 => {
-                    let node = node_ptr.load(Relaxed) as *mut Node16;
+                    let node = node_ptr.load() as *mut Node16;
                     (*node).add_child(key_byte, child)
                 }
                 NodeType::Node48 => {
-                    let node = node_ptr.load(Relaxed) as *mut Node48;
+                    let node = node_ptr.load() as *mut Node48;
                     (*node).add_child(key_byte, child)
                 }
                 NodeType::Node256 => {
-                    let node = node_ptr.load(Relaxed) as *mut Node256;
+                    let node = node_ptr.load() as *mut Node256;
                     (*node).add_child(key_byte, child)
                 }
+                NodeType::KVPair => unreachable!(),
             }
         }
     }
 
-    fn remove_child(node_ptr: &AtomicPtr<usize>, key_byte: u8) -> *mut KVPair {
+    fn remove_child(node_ptr: &NodePtr, key_byte: u8) -> *mut KVPair {
         assert!(!Self::is_kvpair(node_ptr));
 
         let ret = unsafe {
             match Self::get_header(node_ptr).node_type {
                 NodeType::Node4 => {
-                    let node = node_ptr.load(Relaxed) as *mut Node4;
+                    let node = node_ptr.load() as *mut Node4;
                     (*node).remove_child(key_byte)
                 }
                 NodeType::Node16 => {
-                    let node = node_ptr.load(Relaxed) as *mut Node16;
+                    let node = node_ptr.load() as *mut Node16;
                     (*node).remove_child(key_byte)
                 }
                 NodeType::Node48 => {
-                    let node = node_ptr.load(Relaxed) as *mut Node48;
+                    let node = node_ptr.load() as *mut Node48;
                     (*node).remove_child(key_byte)
                 }
                 NodeType::Node256 => {
-                    let node = node_ptr.load(Relaxed) as *mut Node256;
+                    let node = node_ptr.load() as *mut Node256;
                     (*node).remove_child(key_byte)
                 }
+                NodeType::KVPair => unreachable!(),
             }
         };
 
@@ -346,7 +348,7 @@ impl Node {
     }
 
     // Check node is overflow or not.
-    fn is_overflow(node: &AtomicPtr<usize>) -> bool {
+    fn is_overflow(node: &NodePtr) -> bool {
         let header = Self::get_header(node);
         header.count
             > match header.node_type {
@@ -355,10 +357,11 @@ impl Node {
                 NodeType::Node48 => 47,
                 // Node256 won't overflow
                 NodeType::Node256 => 255,
+                NodeType::KVPair => unreachable!(),
             }
     }
 
-    fn is_underflow(node: &AtomicPtr<usize>) -> bool {
+    fn is_underflow(node: &NodePtr) -> bool {
         let header = Self::get_header(node);
         header.count
             < match header.node_type {
@@ -367,24 +370,26 @@ impl Node {
                 NodeType::Node16 => 4,
                 NodeType::Node48 => 16,
                 NodeType::Node256 => 48,
+                NodeType::KVPair => unreachable!(),
             }
     }
 
     // create a new larger node, copy header, child (and key)
     // to it and atomic replace old node
-    fn grow(node: &AtomicPtr<usize>) {
+    fn grow(node: &NodePtr) {
         let header = Self::get_header(node);
         let grown = match header.node_type {
             NodeType::Node4 => Node4::grow(&node),
             NodeType::Node16 => Node16::grow(&node),
             NodeType::Node48 => Node48::grow(&node),
             NodeType::Node256 => unreachable!("Node256 cannot grow"),
+            NodeType::KVPair => unreachable!(),
         };
 
-        node.store(grown, Relaxed);
+        node.store(grown);
     }
 
-    fn shrink(node: &AtomicPtr<usize>) {
+    fn shrink(node: &NodePtr) {
         let header = Self::get_header(node);
 
         let shrunk = match header.node_type {
@@ -392,9 +397,10 @@ impl Node {
             NodeType::Node16 => Node16::shrink(&node),
             NodeType::Node48 => Node48::shrink(&node),
             NodeType::Node256 => Node256::shrink(&node),
+            NodeType::KVPair => unreachable!(),
         };
 
-        node.store(shrunk, Relaxed);
+        node.store(shrunk);
     }
 
     // make a new leaf node. if depth is equal to key length, return `leaf` in in_param,
@@ -415,7 +421,7 @@ impl Node {
                 header.prefix[i] = key[i + depth];
             }
             (*new_leaf).key[0].store(key[depth], Relaxed);
-            (*new_leaf).child[0].store((leaf as usize + 1) as *mut usize, Relaxed);
+            (*new_leaf).child[0].store((leaf as usize + 1) as *mut usize);
             (*new_leaf).mask.store(1, Relaxed);
             (*new_leaf).usued.store(1, Relaxed);
         }
@@ -430,12 +436,13 @@ impl Node {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Copy)]
 pub enum NodeType {
     Node4,
     Node16,
     Node48,
     Node256,
+    KVPair,
 }
 
 #[derive(Debug)]
@@ -458,13 +465,12 @@ impl KVPair {
 #[derive(Debug)]
 pub struct Node4 {
     header: Header,
-    rc: NodeRef<Node4>,
-    leaf: AtomicPtr<usize>,
+    leaf: NodePtr,
     // mark keys exist or not in bits
     mask: AtomicU8,
     usued: AtomicU8,
     key: [AtomicU8; 4],
-    child: [AtomicPtr<usize>; 4],
+    child: [NodePtr; 4],
 }
 
 impl Node4 {
@@ -472,38 +478,30 @@ impl Node4 {
         let (key, child) = {
             let mut key: [MaybeUninit<AtomicU8>; 4] =
                 unsafe { MaybeUninit::uninit().assume_init() };
-            let mut child: [MaybeUninit<AtomicPtr<usize>>; 4] =
+            let mut child: [MaybeUninit<NodePtr>; 4] =
                 unsafe { MaybeUninit::uninit().assume_init() };
 
             for i in 0..4 {
                 key[i] = MaybeUninit::new(AtomicU8::default());
-                child[i] = MaybeUninit::new(AtomicPtr::default());
+                child[i] = MaybeUninit::new(NodePtr::default());
             }
 
             unsafe { (mem::transmute(key), mem::transmute(child)) }
         };
 
-        #[allow(invalid_value)]
-        let rc: NodeRef<Node4> = unsafe { MaybeUninit::uninit().assume_init() };
-
         let mut ret = Self {
             header: Header::new(NodeType::Node4),
-            rc,
             mask: AtomicU8::new(0),
             usued: AtomicU8::new(0),
             key,
             child,
-            leaf: AtomicPtr::default(),
+            leaf: NodePtr::default(),
         };
-
-        let addr = &ret as *const Node4 as *mut Node4;
-        let rc = NodeRef::new(addr);
-        mem::forget(mem::replace(&mut ret.rc, rc));
 
         ret
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
+    pub fn find_child(&self, key: &u8) -> Option<&NodePtr> {
         // for i in 0..self.header.count as usize {
         let usued = self.usued.load(Relaxed);
         let mask = self.mask.load(Relaxed);
@@ -515,9 +513,9 @@ impl Node4 {
         None
     }
 
-    pub fn grow(node: &AtomicPtr<usize>) -> *mut usize {
+    pub fn grow(node: &NodePtr) -> *mut usize {
         let new_node = Box::into_raw(Box::new(Node16::new()));
-        let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node4) };
+        let fulled_node = unsafe { &*(node.load() as *const Node4) };
 
         // copy header
         unsafe {
@@ -531,7 +529,7 @@ impl Node4 {
             for i in 0..4 {
                 if mask >> i & 1 == 1 {
                     (*new_node).key[cnt].store(fulled_node.key[i].load(Relaxed), Relaxed);
-                    (*new_node).child[cnt].store(fulled_node.child[i].load(Relaxed), Relaxed);
+                    (*new_node).child[cnt].store(fulled_node.child[i].load());
                     cnt += 1;
                 }
             }
@@ -546,7 +544,7 @@ impl Node4 {
     pub fn add_child(&mut self, key: u8, child: *const usize) {
         let usued = self.usued.load(Relaxed);
         self.key[usued as usize].store(key, Relaxed);
-        self.child[usued as usize].store(child as *mut usize, Relaxed);
+        self.child[usued as usize].store(child as *mut usize);
 
         self.mask
             .store(self.mask.load(Relaxed) | 1 << usued, Relaxed);
@@ -559,11 +557,29 @@ impl Node4 {
         let mask = self.mask.load(Relaxed);
         for i in 0..4 {
             if mask >> i & 1 == 1 && self.key[i].load(Relaxed) == key {
-                self.mask.store(mask - (1 << i), Relaxed); // todo: fix this
-                return self.child[i].swap(ptr::null::<usize>() as *mut usize, Relaxed);
+                self.mask.store(mask - (1 << i), Relaxed);
+                return self.child[i].swap(ptr::null::<usize>() as *mut usize);
             }
         }
         unreachable!("key must exist")
+    }
+}
+
+impl Drop for Node4 {
+    fn drop(&mut self) {
+        for i in 0..4 {
+            let ptr = self.child[i].load();
+            if ptr.is_null() {
+                return;
+            }
+
+            if self.child[i].get_type() == NodeType::KVPair {
+                let ptr = (ptr as usize - 1) as *mut KVPair;
+                unsafe {
+                    let _ = Box::from_raw(ptr);
+                }
+            }
+        }
     }
 }
 
@@ -571,12 +587,11 @@ impl Node4 {
 #[derive(Debug)]
 struct Node16 {
     header: Header,
-    leaf: AtomicPtr<usize>,
-    rc: NodeRef<Node16>,
+    leaf: NodePtr,
     mask: AtomicU16,
     usued: AtomicU8,
     key: [AtomicU8; 16],
-    child: [AtomicPtr<usize>; 16],
+    child: [NodePtr; 16],
 }
 
 impl Node16 {
@@ -584,37 +599,30 @@ impl Node16 {
         let (key, child) = {
             let mut key: [MaybeUninit<AtomicU8>; 16] =
                 unsafe { MaybeUninit::uninit().assume_init() };
-            let mut child: [MaybeUninit<AtomicPtr<usize>>; 16] =
+            let mut child: [MaybeUninit<NodePtr>; 16] =
                 unsafe { MaybeUninit::uninit().assume_init() };
 
             for i in 0..16 {
                 key[i] = MaybeUninit::new(AtomicU8::default());
-                child[i] = MaybeUninit::new(AtomicPtr::default());
+                child[i] = MaybeUninit::new(NodePtr::default());
             }
 
             unsafe { (mem::transmute(key), mem::transmute(child)) }
         };
-        #[allow(invalid_value)]
-        let rc: NodeRef<Node16> = unsafe { MaybeUninit::uninit().assume_init() };
 
         let mut ret = Self {
             header: Header::new(NodeType::Node16),
-            rc,
-            leaf: AtomicPtr::default(),
+            leaf: NodePtr::default(),
             mask: AtomicU16::new(0),
             usued: AtomicU8::new(0),
             key,
             child,
         };
 
-        let addr = &ret as *const Node16 as *mut Node16;
-        let rc = NodeRef::new(addr);
-        mem::forget(mem::replace(&mut ret.rc, rc));
-
         ret
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
+    pub fn find_child(&self, key: &u8) -> Option<&NodePtr> {
         // todo: use SIMD or binary search
         let usued = self.usued.load(Relaxed);
         let mask = self.mask.load(Relaxed);
@@ -626,9 +634,9 @@ impl Node16 {
         None
     }
 
-    pub fn grow(node: &AtomicPtr<usize>) -> *mut usize {
+    pub fn grow(node: &NodePtr) -> *mut usize {
         let new_node = Box::into_raw(Box::new(Node48::new()));
-        let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node16) };
+        let fulled_node = unsafe { &*(node.load() as *const Node16) };
 
         // copy header
         unsafe {
@@ -641,7 +649,7 @@ impl Node16 {
             let mut cnt = 0;
             for i in 0..16 {
                 if mask >> i & 1 == 1 {
-                    (*new_node).child[cnt].store(fulled_node.child[i].load(Relaxed), Relaxed);
+                    (*new_node).child[cnt].store(fulled_node.child[i].load());
                     (*new_node).key[fulled_node.key[cnt].load(Relaxed) as usize]
                         .store(i as i8, Relaxed);
                     cnt += 1;
@@ -653,9 +661,9 @@ impl Node16 {
         new_node as *mut usize
     }
 
-    pub fn shrink(node: &AtomicPtr<usize>) -> *mut usize {
+    pub fn shrink(node: &NodePtr) -> *mut usize {
         let new_node = Box::into_raw(Box::new(Node4::new()));
-        let empty_node = unsafe { &*(node.load(Relaxed) as *const Node16) };
+        let empty_node = unsafe { &*(node.load() as *const Node16) };
 
         unsafe {
             (*new_node)
@@ -664,9 +672,9 @@ impl Node16 {
 
             let mut cnt = 0;
             for i in 0..16 {
-                if !empty_node.child[i].load(Relaxed).is_null() {
+                if !empty_node.child[i].load().is_null() {
                     (*new_node).key[cnt].store(empty_node.key[i].load(Relaxed), Relaxed);
-                    (*new_node).child[cnt].store(empty_node.child[i].load(Relaxed), Relaxed);
+                    (*new_node).child[cnt].store(empty_node.child[i].load());
                     cnt += 1;
                 }
             }
@@ -682,7 +690,7 @@ impl Node16 {
         let usued = self.usued.load(Relaxed);
         let mask = self.mask.load(Relaxed);
         self.key[usued as usize].store(key, Relaxed);
-        self.child[usued as usize].store(child as *mut usize, Relaxed);
+        self.child[usued as usize].store(child as *mut usize);
 
         self.mask.store(mask | 1 << usued, Relaxed);
         self.usued.fetch_add(1, Relaxed);
@@ -698,7 +706,7 @@ impl Node16 {
             if mask >> i & 1 == 1 && self.key[i].load(Relaxed) == key {
                 // todo: fix this
                 self.mask.store(mask - (1 << i), Relaxed);
-                return self.child[i].swap(ptr::null_mut(), Relaxed);
+                return self.child[i].swap(ptr::null_mut());
             }
         }
         unreachable!("key must exist")
@@ -709,11 +717,10 @@ impl Node16 {
 #[derive(Debug)]
 struct Node48 {
     header: Header,
-    rc: NodeRef<Node48>,
-    leaf: AtomicPtr<usize>,
+    leaf: NodePtr,
     // Stores child index, negative means not exist
     key: [AtomicI8; 256],
-    child: [AtomicPtr<usize>; 48],
+    child: [NodePtr; 48],
 }
 
 impl Node48 {
@@ -721,12 +728,12 @@ impl Node48 {
         let (key, child) = {
             let mut key: [MaybeUninit<AtomicI8>; 256] =
                 unsafe { MaybeUninit::uninit().assume_init() };
-            let mut child: [MaybeUninit<AtomicPtr<usize>>; 48] =
+            let mut child: [MaybeUninit<NodePtr>; 48] =
                 unsafe { MaybeUninit::uninit().assume_init() };
 
             for i in 0..48 {
                 key[i] = MaybeUninit::new(AtomicI8::new(-1));
-                child[i] = MaybeUninit::new(AtomicPtr::default());
+                child[i] = MaybeUninit::new(NodePtr::default());
             }
             for i in 48..256 {
                 key[i] = MaybeUninit::new(AtomicI8::new(-1));
@@ -734,34 +741,27 @@ impl Node48 {
 
             unsafe { (mem::transmute(key), mem::transmute(child)) }
         };
-        #[allow(invalid_value)]
-        let rc: NodeRef<Node48> = unsafe { MaybeUninit::uninit().assume_init() };
 
         let mut ret = Self {
             header: Header::new(NodeType::Node48),
-            rc,
             key,
             child,
-            leaf: AtomicPtr::default(),
+            leaf: NodePtr::default(),
         };
-
-        let addr = &ret as *const Node48 as *mut Node48;
-        let rc = NodeRef::new(addr);
-        mem::forget(mem::replace(&mut ret.rc, rc));
 
         ret
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
+    pub fn find_child(&self, key: &u8) -> Option<&NodePtr> {
         if self.key[*key as usize].load(Relaxed) >= 0 {
             return Some(&self.child[self.key[*key as usize].load(Relaxed) as usize]);
         }
         None
     }
 
-    pub fn grow(node: &AtomicPtr<usize>) -> *mut usize {
+    pub fn grow(node: &NodePtr) -> *mut usize {
         let new_node = Box::into_raw(Box::new(Node256::new()));
-        let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node48) };
+        let fulled_node = unsafe { &*(node.load() as *const Node48) };
 
         // copy header
         unsafe {
@@ -772,10 +772,8 @@ impl Node48 {
             // child field
             for i in 0..=255 {
                 if fulled_node.key[i].load(Relaxed) >= 0 {
-                    (*new_node).child[i].store(
-                        fulled_node.child[fulled_node.key[i].load(Relaxed) as usize].load(Relaxed),
-                        Relaxed,
-                    );
+                    (*new_node).child[i]
+                        .store(fulled_node.child[fulled_node.key[i].load(Relaxed) as usize].load());
                 }
             }
         }
@@ -783,9 +781,9 @@ impl Node48 {
         new_node as *mut usize
     }
 
-    pub fn shrink(node: &AtomicPtr<usize>) -> *mut usize {
+    pub fn shrink(node: &NodePtr) -> *mut usize {
         let new_node = Box::into_raw(Box::new(Node16::new()));
-        let empty_node = unsafe { &*(node.load(Relaxed) as *const Node48) };
+        let empty_node = unsafe { &*(node.load() as *const Node48) };
 
         unsafe {
             (*new_node)
@@ -797,8 +795,7 @@ impl Node48 {
                 let pos = empty_node.key[i].load(Relaxed);
                 if pos >= 0 {
                     (*new_node).key[cnt].store(i as u8, Relaxed);
-                    (*new_node).child[cnt]
-                        .store(empty_node.child[pos as usize].load(Relaxed), Relaxed);
+                    (*new_node).child[cnt].store(empty_node.child[pos as usize].load());
                     cnt += 1;
                 }
             }
@@ -812,7 +809,7 @@ impl Node48 {
     }
 
     pub fn add_child(&mut self, key: u8, child: *const usize) {
-        self.child[self.header.count as usize].store(child as *mut usize, Relaxed);
+        self.child[self.header.count as usize].store(child as *mut usize);
         self.key[key as usize].store(self.header.count as i8, Relaxed);
         self.header.count += 1;
     }
@@ -821,7 +818,7 @@ impl Node48 {
         self.header.count -= 1;
 
         let pos = self.key[key as usize].swap(-1, Relaxed);
-        self.child[pos as usize].swap(ptr::null_mut(), Relaxed)
+        self.child[pos as usize].swap(ptr::null_mut())
     }
 }
 
@@ -829,50 +826,42 @@ impl Node48 {
 #[derive(Debug)]
 struct Node256 {
     header: Header,
-    rc: NodeRef<Node256>,
-    leaf: AtomicPtr<usize>,
-    child: [AtomicPtr<usize>; 256],
+    leaf: NodePtr,
+    child: [NodePtr; 256],
 }
 
 impl Node256 {
     pub fn new() -> Self {
         let child = {
-            let mut child: [MaybeUninit<AtomicPtr<usize>>; 256] =
+            let mut child: [MaybeUninit<NodePtr>; 256] =
                 unsafe { MaybeUninit::uninit().assume_init() };
 
             for i in 0..256 {
-                child[i] = MaybeUninit::new(AtomicPtr::default());
+                child[i] = MaybeUninit::new(NodePtr::default());
             }
 
             unsafe { mem::transmute(child) }
         };
-        #[allow(invalid_value)]
-        let rc: NodeRef<Node256> = unsafe { MaybeUninit::uninit().assume_init() };
 
         let mut ret = Self {
             header: Header::new(NodeType::Node256),
-            rc,
             child,
-            leaf: AtomicPtr::default(),
+            leaf: NodePtr::default(),
         };
-
-        let addr = &ret as *const Node256 as *mut Node256;
-        let rc = NodeRef::new(addr);
-        mem::forget(mem::replace(&mut ret.rc, rc));
 
         ret
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<&AtomicPtr<usize>> {
-        if !self.child[*key as usize].load(Relaxed).is_null() {
+    pub fn find_child(&self, key: &u8) -> Option<&NodePtr> {
+        if !self.child[*key as usize].load().is_null() {
             return Some(&self.child[*key as usize]);
         }
         None
     }
 
-    pub fn shrink(node: &AtomicPtr<usize>) -> *mut usize {
+    pub fn shrink(node: &NodePtr) -> *mut usize {
         let new_node = Box::into_raw(Box::new(Node48::new()));
-        let empty_node = unsafe { &*(node.load(Relaxed) as *const Node256) };
+        let empty_node = unsafe { &*(node.load() as *const Node256) };
 
         unsafe {
             (*new_node)
@@ -881,9 +870,9 @@ impl Node256 {
 
             let mut cnt = 0;
             for i in 0..256 {
-                if !empty_node.child[i].load(Relaxed).is_null() {
+                if !empty_node.child[i].load().is_null() {
                     (*new_node).key[i].store(cnt as i8, Relaxed);
-                    (*new_node).child[cnt].store(empty_node.child[i].load(Relaxed), Relaxed);
+                    (*new_node).child[cnt].store(empty_node.child[i].load());
                     cnt += 1;
                 }
             }
@@ -894,49 +883,118 @@ impl Node256 {
     }
 
     pub fn add_child(&mut self, key: u8, child: *const usize) {
-        self.child[key as usize].store(child as *mut usize, Relaxed);
+        self.child[key as usize].store(child as *mut usize);
         self.header.count += 1;
     }
 
     pub fn remove_child(&mut self, key: u8) -> *mut usize {
         self.header.count -= 1;
-        self.child[key as usize].swap(ptr::null_mut(), Relaxed)
+        self.child[key as usize].swap(ptr::null_mut())
     }
 }
 
 #[derive(Debug)]
-struct NodePtr<T> {
-    ptr: *mut T,
+pub struct NodePtr {
+    ptr: AtomicPtr<usize>,
+    count: AtomicUsize,
 }
 
-impl<T> NodePtr<T> {
-    fn new(ptr: *mut T) -> Self {
-        Self { ptr }
+impl NodePtr {
+    fn new(ptr: *mut usize) -> Self {
+        Self {
+            ptr: AtomicPtr::new(ptr),
+            count: AtomicUsize::new(1),
+        }
+    }
+
+    fn clone(&self) -> Self {
+        todo!()
+    }
+
+    unsafe fn obsolate(&self) {
+        let cnt = self.count.fetch_sub(1, Relaxed);
+        assert!(cnt > 0);
+    }
+
+    fn store(&self, ptr: *mut usize) {
+        self.ptr.store(ptr, Relaxed);
+    }
+
+    fn load(&self) -> *mut usize {
+        self.ptr.load(Relaxed)
+    }
+
+    fn swap(&self, ptr: *mut usize) -> *mut usize {
+        self.ptr.swap(ptr, Relaxed)
+    }
+
+    fn get_type(&self) -> NodeType {
+        let ptr = self.ptr.load(Relaxed);
+        if (ptr as usize) & 1 == 1 {
+            NodeType::KVPair
+        } else {
+            unsafe { (*(ptr as *mut Node4)).header.node_type }
+        }
+    }
+
+    fn refer(&self) -> NodeRef {
+        NodeRef { ptr_ref: &self }
+    }
+
+    // Manually increase strong counter by one.
+    // Usually when creating a new inner node to replace an old one, atomic store
+    // is called instead of "move". which will lead to a `drop` call and decrease
+    // counter. In that situation needs to invoke this method to balance that `drop` call.
+    fn increase_counter(&self) {
+        self.count.fetch_add(1, Relaxed);
     }
 }
 
-impl<T> Drop for NodePtr<T> {
+impl Drop for NodePtr {
     fn drop(&mut self) {
-        println!("dropper called");
-        unsafe {
-            ptr::drop_in_place(self.ptr as *mut T);
-            dealloc(self.ptr as *mut u8, Layout::new::<T>());
+        let cnt = self.count.fetch_sub(1, Relaxed);
+        if cnt == 1 {
+            let ptr = self.load();
+            if ptr.is_null() {
+                return;
+            }
+            println!("going to drop a NodePtr");
+
+            match self.get_type() {
+                NodeType::Node4 => unsafe {
+                    let _ = Box::from_raw(ptr as *mut Node4);
+                },
+                NodeType::Node16 => unsafe {
+                    let _ = Box::from_raw(ptr as *mut Node16);
+                },
+                NodeType::Node48 => unsafe {
+                    let _ = Box::from_raw(ptr as *mut Node48);
+                },
+                NodeType::Node256 => unsafe {
+                    let _ = Box::from_raw(ptr as *mut Node256);
+                },
+                NodeType::KVPair => return,
+            }
         }
     }
 }
 
-#[derive(Debug)]
-struct NodeRef<T>(Arc<NodePtr<T>>);
-
-impl<T> NodeRef<T> {
-    fn new(ptr: *mut T) -> Self {
-        NodeRef(Arc::new(NodePtr::new(ptr)))
+impl Default for NodePtr {
+    fn default() -> Self {
+        Self {
+            ptr: AtomicPtr::new(ptr::null_mut::<usize>()),
+            count: AtomicUsize::new(1),
+        }
     }
+}
 
-    #[allow(unused)]
-    unsafe fn obsolate(&self) {
-        let ptr = Arc::into_raw(self.0.clone());
-        Arc::decr_strong_count(ptr);
+struct NodeRef<'a> {
+    ptr_ref: &'a NodePtr,
+}
+
+impl<'a> Drop for NodeRef<'a> {
+    fn drop(&mut self) {
+        self.ptr_ref.count.fetch_sub(1, Relaxed);
     }
 }
 
@@ -999,6 +1057,7 @@ mod test {
                     let node = (node_ptr as *mut Node256).as_ref().unwrap();
                     debug!("Node4: {:?}", node);
                 }
+                NodeType::KVPair => unreachable!(),
             }
         }
     }
@@ -1010,7 +1069,7 @@ mod test {
     // todo: maybe remove this? needn't a specific `init()` call
     #[test]
     fn init() {
-        let root = AtomicPtr::new(empty_node4() as *mut usize);
+        let root = NodePtr::new(empty_node4() as *mut usize);
         Node::init(&root, &[1, 2, 3, 4], &[1, 2, 3, 4]);
         let header = Node::get_header(&root);
         debug!("header: {:?}", header);
@@ -1022,7 +1081,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_simple_from_ground() {
-        let root = AtomicPtr::new(ptr::null::<*const usize>() as *mut usize);
+        let root = NodePtr::new(ptr::null::<*const usize>() as *mut usize);
         let kvpair = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec());
         let kvpair_ptr = Box::into_raw(Box::new(kvpair));
         Node::insert(&root, &[1, 2, 3, 4], kvpair_ptr, 0).unwrap();
@@ -1037,14 +1096,14 @@ mod test {
 
     #[test]
     fn test_node_expand() {
-        let root = AtomicPtr::new(empty_node4() as *mut usize);
+        let root = NodePtr::new(empty_node4() as *mut usize);
         Node::init(&root, &[1, 2, 3, 4], &[1, 2, 3, 4]);
 
         let kvs = vec![vec![1, 2, 1], vec![1, 2, 2], vec![1, 2, 2, 1]];
 
         let mut answer = HashMap::new();
         for kv in &kvs {
-            debug_print_atomic(&root);
+            // debug_print_atomic(&root);
             // let kvpair = KVPair::new(kv.to_owned(), kv.to_owned());
             // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             let kvpair_ptr = KVPair::new(kv.to_owned(), kv.to_owned()).into_raw();
@@ -1071,7 +1130,7 @@ mod test {
 
     #[test]
     fn test_node_grow() {
-        let root = AtomicPtr::new(empty_node4() as *mut usize);
+        let root = NodePtr::new(empty_node4() as *mut usize);
         Node::init(&root, &[1, 1, 1, 0], &[1, 1, 1, 0]);
 
         let mut kvs = [[1, 1, 1, 1]; 255];
@@ -1082,7 +1141,7 @@ mod test {
         // insert
         let mut answer = HashMap::new();
         for kv in &kvs {
-            debug_print_atomic(&root);
+            // debug_print_atomic(&root);
             // let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
             // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             let kvpair_ptr = KVPair::new(kv.to_vec(), kv.to_vec()).into_raw();
@@ -1109,7 +1168,7 @@ mod test {
 
     #[test]
     fn test_node_substring() {
-        let root = AtomicPtr::new(empty_node4() as *mut usize);
+        let root = NodePtr::new(empty_node4() as *mut usize);
         Node::init(&root, &[0], &[0]);
         let test_size = 100;
 
@@ -1123,7 +1182,7 @@ mod test {
         // insert
         let mut answer = HashMap::new();
         for kv in &kvs {
-            debug_print_atomic(&root);
+            // debug_print_atomic(&root);
             // let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
             // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             let kvpair_ptr = KVPair::new(kv.to_vec(), kv.to_vec()).into_raw();
@@ -1150,7 +1209,7 @@ mod test {
 
     #[test]
     fn test_node_collapse() {
-        let root = AtomicPtr::new(empty_node4() as *mut usize);
+        let root = NodePtr::new(empty_node4() as *mut usize);
         Node::init(&root, &[1], &[0]);
 
         let kvs = vec![
