@@ -1,4 +1,6 @@
 #[allow(unused_variables)]
+#[allow(dead_code)]
+#[allow(unused_imports)]
 use std::fmt::Debug;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
@@ -31,13 +33,13 @@ impl Node {
     }
 
     pub fn search<'a>(node: NodeRef, key: &[u8], depth: usize) -> Option<NodeRef> {
-        if (*node).is_null() {
+        if node.is_null() {
             info!("search encounted a null ptr");
             return None;
         }
         // lazy expansion
         // run out of key bytes, should reach leaf node
-        if depth == key.len() {
+        if depth == key.len() || Self::is_kvpair(&node) {
             if Self::is_leaf_match(&node, key) {
                 if Self::is_kvpair(&node) {
                     return Some(node);
@@ -82,8 +84,11 @@ impl Node {
         leaf: *mut KVPair,
         depth: usize,
     ) -> Result<(), ()> {
-        if (*node).is_null() {
-            node.store(leaf as *mut usize, Relaxed);
+        if node.is_null() {
+            let leaf = NodeRef::new(leaf as *mut usize);
+            // node.replace_underlying(leaf as *mut usize);
+            node.replace_with(leaf);
+            node.add_leaf_mark();
             return Ok(());
         }
         unsafe {
@@ -93,7 +98,7 @@ impl Node {
                 let new_inner_node_ptr = Self::make_node4() as *mut usize;
                 // maybe no prefix? Todo: check this
                 let new_inner_node = &mut *(new_inner_node_ptr as *mut Node4);
-                new_inner_node.leaf.store(*node, Relaxed);
+                new_inner_node.leaf.replace_with(node.refer());
                 let new_inner_ref = NodeRef::new(new_inner_node_ptr);
                 Self::add_child(
                     &new_inner_ref,
@@ -102,7 +107,7 @@ impl Node {
                     true,
                 );
                 // swap
-                node.store(new_inner_node_ptr, Relaxed);
+                node.replace_underlying(new_inner_node_ptr);
                 return Ok(());
             }
             let p = Self::check_prefix(&node, key, depth);
@@ -136,7 +141,7 @@ impl Node {
                     false,
                 );
 
-                node.store(*new_inner_node as *mut usize, Relaxed);
+                node.replace_underlying(*new_inner_node as *mut usize);
                 // todo: drop old ptr
                 return Ok(());
             }
@@ -385,7 +390,7 @@ impl Node {
             NodeType::Node256 => unreachable!("Node256 cannot grow"),
         };
 
-        node.store(grown, Relaxed);
+        node.replace_underlying(grown);
     }
 
     fn shrink(node: &NodeRef) {
@@ -398,12 +403,14 @@ impl Node {
             NodeType::Node256 => Node256::shrink(&node),
         };
 
-        node.store(shrunk, Relaxed);
+        node.replace_underlying(shrunk);
     }
 
     // make a new leaf node. if depth is equal to key length, return `leaf` in in_param,
     // with a boolean flag to identify it type is `KVPair`. otherwise create a inner node
     // and add `leaf` to its child field.
+    //
+    // todo: not directly +1 / -1
     fn make_new_leaf(key: &[u8], leaf: *mut KVPair, depth: usize) -> (*mut usize, bool) {
         // needn't to wrap a Node4
         if key.len() == depth {
@@ -419,7 +426,7 @@ impl Node {
                 header.prefix[i] = key[i + depth];
             }
             (*new_leaf).key[0].store(key[depth], Relaxed);
-            (*new_leaf).child[0].store((leaf as usize + 1) as *mut usize, Relaxed);
+            (*new_leaf).child[0].replace_underlying((leaf as usize + 1) as *mut usize);
             (*new_leaf).mask.store(1, Relaxed);
             (*new_leaf).usued.store(1, Relaxed);
         }
@@ -524,7 +531,7 @@ impl Node4 {
             for i in 0..4 {
                 if mask >> i & 1 == 1 {
                     (*new_node).key[cnt].store(fulled_node.key[i].load(Relaxed), Relaxed);
-                    (*new_node).child[cnt].store(*fulled_node.child[i], Relaxed);
+                    (*new_node).child[cnt].replace_underlying(*fulled_node.child[i]);
                     cnt += 1;
                 }
             }
@@ -539,7 +546,7 @@ impl Node4 {
     pub fn add_child(&mut self, key: u8, child: *const usize) {
         let usued = self.usued.load(Relaxed);
         self.key[usued as usize].store(key, Relaxed);
-        self.child[usued as usize].store(child as *mut usize, Relaxed);
+        self.child[usued as usize].replace_underlying(child as *mut usize);
 
         self.mask
             .store(self.mask.load(Relaxed) | 1 << usued, Relaxed);
@@ -624,7 +631,7 @@ impl Node16 {
             let mut cnt = 0;
             for i in 0..16 {
                 if mask >> i & 1 == 1 {
-                    (*new_node).child[cnt].store(*fulled_node.child[i], Relaxed);
+                    (*new_node).child[cnt].replace_underlying(*fulled_node.child[i]);
                     (*new_node).key[fulled_node.key[cnt].load(Relaxed) as usize]
                         .store(i as i8, Relaxed);
                     cnt += 1;
@@ -649,7 +656,7 @@ impl Node16 {
             for i in 0..16 {
                 if !empty_node.child[i].load(Relaxed).is_null() {
                     (*new_node).key[cnt].store(empty_node.key[i].load(Relaxed), Relaxed);
-                    (*new_node).child[cnt].store(empty_node.child[i].load(Relaxed), Relaxed);
+                    (*new_node).child[cnt].replace_underlying(empty_node.child[i].load(Relaxed));
                     cnt += 1;
                 }
             }
@@ -665,7 +672,7 @@ impl Node16 {
         let usued = self.usued.load(Relaxed);
         let mask = self.mask.load(Relaxed);
         self.key[usued as usize].store(key, Relaxed);
-        self.child[usued as usize].store(child as *mut usize, Relaxed);
+        self.child[usued as usize].replace_underlying(child as *mut usize);
 
         self.mask.store(mask | 1 << usued, Relaxed);
         self.usued.fetch_add(1, Relaxed);
@@ -745,9 +752,8 @@ impl Node48 {
             // child field
             for i in 0..=255 {
                 if fulled_node.key[i].load(Relaxed) >= 0 {
-                    (*new_node).child[i].store(
+                    (*new_node).child[i].replace_underlying(
                         fulled_node.child[fulled_node.key[i].load(Relaxed) as usize].load(Relaxed),
-                        Relaxed,
                     );
                 }
             }
@@ -771,7 +777,7 @@ impl Node48 {
                 if pos >= 0 {
                     (*new_node).key[cnt].store(i as u8, Relaxed);
                     (*new_node).child[cnt]
-                        .store(empty_node.child[pos as usize].load(Relaxed), Relaxed);
+                        .replace_underlying(empty_node.child[pos as usize].load(Relaxed));
                     cnt += 1;
                 }
             }
@@ -785,7 +791,7 @@ impl Node48 {
     }
 
     pub fn add_child(&mut self, key: u8, child: *const usize) {
-        self.child[self.header.count as usize].store(child as *mut usize, Relaxed);
+        self.child[self.header.count as usize].replace_underlying(child as *mut usize);
         self.key[key as usize].store(self.header.count as i8, Relaxed);
         self.header.count += 1;
     }
@@ -846,7 +852,7 @@ impl Node256 {
             for i in 0..256 {
                 if !empty_node.child[i].load(Relaxed).is_null() {
                     (*new_node).key[i].store(cnt as i8, Relaxed);
-                    (*new_node).child[cnt].store(empty_node.child[i].load(Relaxed), Relaxed);
+                    (*new_node).child[cnt].replace_underlying(empty_node.child[i].load(Relaxed));
                     cnt += 1;
                 }
             }
@@ -857,7 +863,7 @@ impl Node256 {
     }
 
     pub fn add_child(&mut self, key: u8, child: *const usize) {
-        self.child[key as usize].store(child as *mut usize, Relaxed);
+        self.child[key as usize].replace_underlying(child as *mut usize);
         self.header.count += 1;
     }
 
@@ -935,15 +941,18 @@ mod test {
     }
 
     // todo: maybe remove this? needn't a specific `init()` call
-    // #[test]
-    // fn init() {
-    //     let root = AtomicPtr::new(empty_node4() as *mut usize);
-    //     Node::init(&root, &[1, 2, 3, 4], &[1, 2, 3, 4]);
-    //     let header = Node::get_header(&root);
-    //     debug!("header: {:?}", header);
-    //     let result = Node::search(&root, &[1, 2, 3, 4], 0);
-    //     debug!("result kvpair: {:?}", result.unwrap());
-    // }
+    #[test]
+    fn init() {
+        // let root = NodeRef::new(Node::make_node4() as *mut usize);
+        // let root = NodeRef::new(ptr::null_mut());
+        let root = NodeRef::default();
+        let kvpair_ptr = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec()).into_raw();
+        Node::insert(root.refer(), &[1, 2, 3, 4], kvpair_ptr, 0).unwrap();
+        // let header = Node::get_header(&root);
+        // debug!("header: {:?}", header);
+        let result = Node::search(root.refer(), &[1, 2, 3, 4], 0);
+        println!("result kvpair: {:?}", result.unwrap());
+    }
 
     // todo: fix and remove ignore
     // #[test]

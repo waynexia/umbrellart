@@ -1,11 +1,11 @@
-use std::intrinsics::atomic_store;
+use std::intrinsics::{atomic_store, atomic_xchg};
 use std::ops::Deref;
 use std::ptr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, Relaxed as DefaultOrdering};
 
 #[derive(Debug)]
-pub struct NodeContainer {
+struct NodeContainer {
     node: *mut usize,
     counter: AtomicUsize,
 }
@@ -47,15 +47,19 @@ pub struct NodeRef {
 impl NodeRef {
     pub fn new(node: *mut usize) -> Self {
         let container = NodeContainer::new(node);
-        let c_ptr = Box::into_raw(Box::new(container));
-        Self { ptr: c_ptr }
-    }
-
-    pub fn from_container(ptr: *mut NodeContainer) -> Self {
+        let ptr = Box::into_raw(Box::new(container));
         Self { ptr }
     }
 
+    // pub fn from_container(ptr: *mut NodeContainer) -> Self {
+    //     Self { ptr }
+    // }
+
     pub fn refer(&self) -> Self {
+        if self.ptr.is_null() {
+            return Self::default();
+        }
+
         unsafe {
             (*self.ptr).add_ref();
         }
@@ -76,15 +80,49 @@ impl NodeRef {
         unsafe { (*self.ptr).node }
     }
 
-    /// User should guarantee no data race. Like keeping
-    pub fn store(&self, ptr: *mut usize, _ordering: Ordering) {
+    /// User should guarantee no data race. Like keeping a lock.
+    /// This method will decrease previous underlying container's reference count if have.
+    ///
+    /// This method should not be called directly? Use replace_with() instead.
+    pub fn replace_underlying(&self, ptr: *mut usize) {
         unsafe {
-            atomic_store(
-                &(self.ptr as usize) as *const usize as *mut usize,
+            let previous = atomic_xchg(
+                // &(self.ptr as usize) as *const usize as *mut usize,
+                &self.ptr as *const _ as *mut _,
                 ptr as usize,
-            );
+            ) as *mut NodeContainer;
+            if !previous.is_null() {
+                // decrease previous' refer count
+                (*previous).del_ref();
+            }
         }
-        // todo!("replace this")
+    }
+
+    /// No write-confilct free guarantee as above
+    pub fn replace_with(&self, new_item: Self) {
+        unsafe {
+            // increase reference counter as `new_item` will be dropped when get out of this block
+            (*new_item.ptr).add_ref();
+            self.replace_underlying(new_item.ptr as *mut usize)
+        }
+    }
+
+    pub fn add_leaf_mark(&self) {
+        unsafe {
+            let mut container = &mut *self.ptr;
+            container.node = (container.node as usize + 1) as *mut usize;
+        }
+    }
+
+    pub fn remove_leaf_mark(&self) {
+        unsafe {
+            let mut container = &mut *self.ptr;
+            container.node = (container.node as usize - 1) as *mut usize;
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        unsafe { (*self.ptr).node.is_null() }
     }
 }
 
@@ -100,9 +138,7 @@ impl Drop for NodeRef {
 
 impl Default for NodeRef {
     fn default() -> Self {
-        Self {
-            ptr: ptr::null_mut(),
-        }
+        Self::new(ptr::null_mut())
     }
 }
 
