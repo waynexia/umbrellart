@@ -39,6 +39,14 @@ impl NodeContainer {
 /// A reference to underlying `NodeContainer`. This struct itself is not thread safe.
 /// Additional operation like lock or atomic write should be taken to ensure lock-free
 /// read is safe.
+///
+/// This Ref can be used to achieve two access mode, read and write in particular. For
+/// `Read` access, one can make a copy of node by refer() method. The copy provides reader
+/// a ensurance that this node won't be reclaimed during read operation. And in this mode
+/// every node operation is operating on a "mirror NodeRef" creates by refer(), which means
+/// underlying container cannot be replaced. On the contrary, `Write` mode happens when
+/// directly operating on the NodeRef stored in tree, so replacing underlying container is
+/// persistent.
 #[derive(Debug)]
 pub struct NodeRef {
     ptr: *mut NodeContainer,
@@ -66,6 +74,7 @@ impl NodeRef {
         Self { ptr: self.ptr }
     }
 
+    // below are deprecated
     pub fn swap(&self, rhs: Self) {}
 
     pub fn replace(&self, rhs: Self) {}
@@ -79,6 +88,7 @@ impl NodeRef {
     pub fn load(&self, ordering: Ordering) -> *mut usize {
         unsafe { (*self.ptr).node }
     }
+    // above are deprecated.
 
     /// User should guarantee no data race. Like keeping a lock.
     /// This method will decrease previous underlying container's reference count if have.

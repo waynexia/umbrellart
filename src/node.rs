@@ -79,7 +79,7 @@ impl Node {
 
     // leaf pointer is tagged
     pub fn insert<'a>(
-        node: NodeRef,
+        node: &NodeRef,
         key: &[u8],
         leaf: *mut KVPair,
         depth: usize,
@@ -115,7 +115,7 @@ impl Node {
             if p != Self::get_prefix_len(&node) {
                 // make a copy of node and modify it,
                 // construct new inner node and replace node
-                let mut node_substitute: Node4 = mem::transmute_copy(&*(*node as *const Node4)); // ?
+                let mut node_substitute: Node4 = mem::transmute_copy(&*(**node as *const Node4)); // ?
                 node_substitute.header.prefix_len = p;
                 let node_substitute_ptr = Box::into_raw(Box::new(node_substitute));
 
@@ -148,7 +148,7 @@ impl Node {
 
             let depth = depth + Self::get_prefix_len(&node) as usize;
             if let Some(next_node) = Self::find_child(&node, &key[depth]) {
-                Self::insert(next_node, key, leaf, depth + 1)?;
+                Self::insert(&next_node, key, leaf, depth + 1)?;
             } else {
                 if Self::is_overflow(&node) {
                     Self::grow(&node);
@@ -940,18 +940,17 @@ mod test {
         debug_print(node.load(Relaxed));
     }
 
-    // todo: maybe remove this? needn't a specific `init()` call
     #[test]
-    fn init() {
-        // let root = NodeRef::new(Node::make_node4() as *mut usize);
-        // let root = NodeRef::new(ptr::null_mut());
+    fn test_node_init() {
         let root = NodeRef::default();
         let kvpair_ptr = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec()).into_raw();
-        Node::insert(root.refer(), &[1, 2, 3, 4], kvpair_ptr, 0).unwrap();
-        // let header = Node::get_header(&root);
-        // debug!("header: {:?}", header);
-        let result = Node::search(root.refer(), &[1, 2, 3, 4], 0);
-        println!("result kvpair: {:?}", result.unwrap());
+        Node::insert(&root, &[1, 2, 3, 4], kvpair_ptr, 0).unwrap();
+        let result = Node::search(root.refer(), &[1, 2, 3, 4], 0).unwrap();
+        // todo: move this into `search()`
+        result.remove_leaf_mark();
+        unsafe {
+            println!("result kvpair: {:?}", *(*result as *mut KVPair));
+        }
     }
 
     // todo: fix and remove ignore
@@ -972,6 +971,7 @@ mod test {
     // }
 
     #[test]
+    #[ignore]
     fn test_node_expand() {
         // let root = AtomicPtr::new(empty_node4() as *mut usize);
         let root = NodeRef::new(Node::make_node4() as *mut usize);
@@ -986,7 +986,7 @@ mod test {
             // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             let kvpair_ptr = KVPair::new(kv.to_owned(), kv.to_owned()).into_raw();
             answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
-            Node::insert(root.refer(), &kv, kvpair_ptr, 0).unwrap();
+            Node::insert(&root, &kv, kvpair_ptr, 0).unwrap();
         }
 
         // search
