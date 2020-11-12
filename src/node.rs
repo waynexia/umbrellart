@@ -18,21 +18,7 @@ const MAX_PREFIX_STORED: usize = 10;
 pub struct Node {}
 
 impl Node {
-    // todo: Remove this
-    pub fn init(node: NodeRef, key: &[u8], value: &[u8]) {
-        let mut header = Self::get_header_mut(*node);
-        assert!(header.count == 0);
-        header.prefix_len = key.len() as u32 - 1;
-        for i in 0..(header.prefix_len as usize).min(MAX_PREFIX_STORED) {
-            header.prefix[i] = key[i];
-        }
-        let kvpair = KVPair::new(key.to_owned(), value.to_owned());
-        // let kvpair_ptr = Box::into_raw(Box::new(kvpair)) as usize + 1;
-        let kvpair_ptr = Box::into_raw(Box::new(kvpair));
-        Self::add_child(&node, key[key.len() - 1], kvpair_ptr as *mut usize, true);
-    }
-
-    pub fn search<'a>(node: NodeRef, key: &[u8], depth: usize) -> Option<NodeRef> {
+    pub fn search<'a>(node: &NodeRef, key: &[u8], depth: usize) -> Option<NodeRef> {
         if node.is_null() {
             info!("search encounted a null ptr");
             return None;
@@ -42,7 +28,7 @@ impl Node {
         if depth == key.len() || Self::is_kvpair(&node) {
             if Self::is_leaf_match(&node, key) {
                 if Self::is_kvpair(&node) {
-                    return Some(node);
+                    return Some(node.refer());
                 } else {
                     let leaf = Self::to_node4(&node).leaf.refer();
                     return if !leaf.is_null() {
@@ -70,7 +56,7 @@ impl Node {
         // another lazy expansion?
         if Node::is_kvpair(&next) {
             if Node::is_leaf_match(&next, key) {
-                return Some(next);
+                return Some(next.refer());
             }
             return None;
         }
@@ -84,11 +70,23 @@ impl Node {
         leaf: *mut KVPair,
         depth: usize,
     ) -> Result<(), ()> {
+        // what if key.len() = 0?
+
         if node.is_null() {
             let leaf = NodeRef::new(leaf as *mut usize);
-            // node.replace_underlying(leaf as *mut usize);
-            node.replace_with(leaf);
-            node.add_leaf_mark();
+
+            // Make a node4 and add `leaf` to it. Then replace node by that new node4.
+            let inner_node_ptr = Self::make_node4();
+            let inner_node = NodeRef::new(inner_node_ptr as *mut usize);
+            let header = Self::get_header_mut(inner_node_ptr as *mut usize);
+            header.count = 1;
+            header.prefix_len = key.len() as u32 - 1;
+            for i in 0..MAX_PREFIX_STORED.min(key.len() - 1) {
+                header.prefix[i] = key[i];
+            }
+            Self::add_child(&inner_node, *key.last().unwrap(), leaf, true);
+
+            node.replace_with(inner_node);
             return Ok(());
         }
         unsafe {
@@ -100,14 +98,11 @@ impl Node {
                 let new_inner_node = &mut *(new_inner_node_ptr as *mut Node4);
                 new_inner_node.leaf.replace_with(node.refer());
                 let new_inner_ref = NodeRef::new(new_inner_node_ptr);
-                Self::add_child(
-                    &new_inner_ref,
-                    *key.last().unwrap(),
-                    leaf as *mut usize,
-                    true,
-                );
+                let leaf = NodeRef::new(leaf as *mut usize);
+                Self::add_child(&new_inner_ref, *key.last().unwrap(), leaf, true);
                 // swap
-                node.replace_underlying(new_inner_node_ptr);
+                // node.replace_underlying(new_inner_node_ptr);
+                node.replace_with(new_inner_ref);
                 return Ok(());
             }
             let p = Self::check_prefix(&node, key, depth);
@@ -131,13 +126,13 @@ impl Node {
                 Self::add_child(
                     &new_inner_node,
                     key[depth + p as usize],
-                    leaf as *const usize,
+                    NodeRef::new(leaf as *mut usize),
                     true,
                 );
                 Self::add_child(
                     &new_inner_node,
                     node_prefix[p as usize],
-                    node_substitute_ptr as *mut usize,
+                    NodeRef::new(node_substitute_ptr as *mut usize),
                     false,
                 );
 
@@ -154,7 +149,7 @@ impl Node {
                     Self::grow(&node);
                 }
                 let (new_leaf_node, is_kvpair) = Self::make_new_leaf(key, leaf, depth + 1);
-                Self::add_child(&node, key[depth], new_leaf_node, is_kvpair);
+                Self::add_child(&node, key[depth], NodeRef::new(new_leaf_node), is_kvpair);
             }
             return Ok(());
         }
@@ -265,7 +260,7 @@ impl Node {
         unsafe { (*(**node as *const Header)).prefix_len }
     }
 
-    fn find_child<'a>(node_ptr: &NodeRef, key_byte: &u8) -> Option<NodeRef> {
+    fn find_child<'a>(node_ptr: &'a NodeRef, key_byte: &u8) -> Option<&'a NodeRef> {
         assert!(!Self::is_kvpair(node_ptr));
 
         unsafe {
@@ -301,9 +296,12 @@ impl Node {
     }
 
     // todo: SIMD
-    fn add_child(node_ptr: &NodeRef, key_byte: u8, child: *const usize, is_kvpair: bool) {
+    fn add_child(node_ptr: &NodeRef, key_byte: u8, child: NodeRef, is_kvpair: bool) {
         assert!(!Self::is_kvpair(node_ptr));
-        let child = (child as usize + is_kvpair as usize) as *const usize;
+        // let child = (child as usize + is_kvpair as usize) as *const usize;
+        if is_kvpair {
+            child.add_leaf_mark();
+        }
 
         unsafe {
             match Self::get_header(node_ptr).node_type {
@@ -449,7 +447,7 @@ pub enum NodeType {
     Node256,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct KVPair {
     pub key: Vec<u8>,
     pub value: Vec<u8>,
@@ -503,13 +501,13 @@ impl Node4 {
         }
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<NodeRef> {
+    pub fn find_child(&self, key: &u8) -> Option<&NodeRef> {
         // for i in 0..self.header.count as usize {
         let usued = self.usued.load(Relaxed);
         let mask = self.mask.load(Relaxed);
         for i in 0..usued as usize {
             if mask >> i & 1 == 1 && self.key[i].load(Relaxed) == *key {
-                return Some(self.child[i].refer());
+                return Some(&self.child[i]);
             }
         }
         None
@@ -543,10 +541,10 @@ impl Node4 {
         new_node as *mut usize
     }
 
-    pub fn add_child(&mut self, key: u8, child: *const usize) {
+    pub fn add_child(&mut self, key: u8, child: NodeRef) {
         let usued = self.usued.load(Relaxed);
         self.key[usued as usize].store(key, Relaxed);
-        self.child[usued as usize].replace_underlying(child as *mut usize);
+        self.child[usued as usize].replace_with(child);
 
         self.mask
             .store(self.mask.load(Relaxed) | 1 << usued, Relaxed);
@@ -604,13 +602,13 @@ impl Node16 {
         }
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<NodeRef> {
+    pub fn find_child(&self, key: &u8) -> Option<&NodeRef> {
         // todo: use SIMD or binary search
         let usued = self.usued.load(Relaxed);
         let mask = self.mask.load(Relaxed);
         for i in 0..usued as usize {
             if mask >> i & 1 == 1 && self.key[i].load(Relaxed) == *key {
-                return Some(self.child[i].refer());
+                return Some(&self.child[i]);
             }
         }
         None
@@ -668,11 +666,11 @@ impl Node16 {
         new_node as *mut usize
     }
 
-    pub fn add_child(&mut self, key: u8, child: *const usize) {
+    pub fn add_child(&mut self, key: u8, child: NodeRef) {
         let usued = self.usued.load(Relaxed);
         let mask = self.mask.load(Relaxed);
         self.key[usued as usize].store(key, Relaxed);
-        self.child[usued as usize].replace_underlying(child as *mut usize);
+        self.child[usued as usize].replace_with(child);
 
         self.mask.store(mask | 1 << usued, Relaxed);
         self.usued.fetch_add(1, Relaxed);
@@ -732,9 +730,9 @@ impl Node48 {
         }
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<NodeRef> {
+    pub fn find_child(&self, key: &u8) -> Option<&NodeRef> {
         if self.key[*key as usize].load(Relaxed) >= 0 {
-            return Some(self.child[self.key[*key as usize].load(Relaxed) as usize].refer());
+            return Some(&self.child[self.key[*key as usize].load(Relaxed) as usize]);
         }
         None
     }
@@ -790,8 +788,8 @@ impl Node48 {
         new_node as *mut usize
     }
 
-    pub fn add_child(&mut self, key: u8, child: *const usize) {
-        self.child[self.header.count as usize].replace_underlying(child as *mut usize);
+    pub fn add_child(&mut self, key: u8, child: NodeRef) {
+        self.child[self.header.count as usize].replace_with(child);
         self.key[key as usize].store(self.header.count as i8, Relaxed);
         self.header.count += 1;
     }
@@ -832,9 +830,9 @@ impl Node256 {
         }
     }
 
-    pub fn find_child(&self, key: &u8) -> Option<NodeRef> {
+    pub fn find_child(&self, key: &u8) -> Option<&NodeRef> {
         if !self.child[*key as usize].load(Relaxed).is_null() {
-            return Some(self.child[*key as usize].refer());
+            return Some(&self.child[*key as usize]);
         }
         None
     }
@@ -862,8 +860,8 @@ impl Node256 {
         new_node as *mut usize
     }
 
-    pub fn add_child(&mut self, key: u8, child: *const usize) {
-        self.child[key as usize].replace_underlying(child as *mut usize);
+    pub fn add_child(&mut self, key: u8, child: NodeRef) {
+        self.child[key as usize].replace_with(child);
         self.header.count += 1;
     }
 
@@ -941,43 +939,49 @@ mod test {
     }
 
     #[test]
-    fn test_node_init() {
+    fn test_node_insert_from_empty() {
         let root = NodeRef::default();
         let kvpair_ptr = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec()).into_raw();
         Node::insert(&root, &[1, 2, 3, 4], kvpair_ptr, 0).unwrap();
-        let result = Node::search(root.refer(), &[1, 2, 3, 4], 0).unwrap();
-        // todo: move this into `search()`
+        let result = Node::search(&root.refer(), &[1, 2, 3, 4], 0).unwrap();
+        // todo: move this into `search()`, or move `add_leaf_mark()` out.
         result.remove_leaf_mark();
         unsafe {
-            println!("result kvpair: {:?}", *(*result as *mut KVPair));
+            assert_eq!(*(*result as *mut KVPair), *kvpair_ptr);
         }
     }
 
-    // todo: fix and remove ignore
-    // #[test]
-    // #[ignore]
-    // fn test_simple_from_ground() {
-    //     let root = AtomicPtr::new(ptr::null::<*const usize>() as *mut usize);
-    //     let kvpair = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec());
-    //     let kvpair_ptr = Box::into_raw(Box::new(kvpair));
-    //     Node::insert(&root, &[1, 2, 3, 4], kvpair_ptr, 0).unwrap();
+    #[test]
+    fn test_node_simple_insert_two() {
+        let root = NodeRef::default();
+        let kvpair1 = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec()).into_raw();
+        Node::insert(&root, &[1, 2, 3, 4], kvpair1, 0).unwrap();
 
-    //     let kvpair = KVPair::new([1, 2, 3, 4, 5].to_vec(), [1, 2, 3, 4, 5].to_vec());
-    //     let kvpair_ptr = Box::into_raw(Box::new(kvpair));
-    //     Node::insert(&root, &[1, 2, 3, 4, 5], kvpair_ptr, 0).unwrap();
+        let kvpair2 = KVPair::new([1, 2, 3, 5].to_vec(), [1, 2, 3, 5].to_vec()).into_raw();
+        Node::insert(&root, &[1, 2, 3, 5], kvpair2, 0).unwrap();
 
-    //     Node::search(&root, &[1, 2, 3, 4], 0).unwrap();
-    //     Node::search(&root, &[1, 2, 3, 4, 5], 0).unwrap();
-    // }
+        let result1 = Node::search(&root, &[1, 2, 3, 4], 0).unwrap();
+        result1.remove_leaf_mark();
+        let result2 = Node::search(&root, &[1, 2, 3, 5], 0).unwrap();
+        result2.remove_leaf_mark();
+
+        unsafe {
+            assert_eq!(*(*result1 as *mut KVPair), *kvpair1);
+            assert_eq!(*(*result2 as *mut KVPair), *kvpair2);
+        }
+    }
 
     #[test]
     #[ignore]
     fn test_node_expand() {
-        // let root = AtomicPtr::new(empty_node4() as *mut usize);
-        let root = NodeRef::new(Node::make_node4() as *mut usize);
-        Node::init(root.refer(), &[1, 2, 3, 4], &[1, 2, 3, 4]);
+        let root = NodeRef::default();
 
-        let kvs = vec![vec![1, 2, 1], vec![1, 2, 2], vec![1, 2, 2, 1]];
+        let kvs = vec![
+            vec![1, 2, 3, 4],
+            vec![1, 2, 1],
+            vec![1, 2, 2],
+            vec![1, 2, 2, 1],
+        ];
 
         let mut answer = HashMap::new();
         for kv in &kvs {
@@ -991,7 +995,7 @@ mod test {
 
         // search
         for kv in &kvs {
-            let result = Node::search(root.refer(), kv, 0).unwrap();
+            let result = Node::search(&root.refer(), kv, 0).unwrap();
             println!("result: {:?}", *result);
             // assert_eq!(result, *answer.get(kv).unwrap());
         }

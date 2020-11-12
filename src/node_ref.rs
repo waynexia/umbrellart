@@ -103,7 +103,9 @@ impl NodeRef {
             ) as *mut NodeContainer;
             if !previous.is_null() {
                 // decrease previous' refer count
-                (*previous).del_ref();
+                if (*previous).del_ref() {
+                    let _ = Box::from_raw(previous);
+                }
             }
         }
     }
