@@ -3,10 +3,8 @@
 #[allow(unused_imports)]
 use std::fmt::Debug;
 use std::mem::{self, MaybeUninit};
-use std::ptr;
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::atomic::{AtomicI8, AtomicPtr, AtomicU16, AtomicU8};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicI8, AtomicU16, AtomicU8};
 
 use crate::node_ref::NodeRef;
 
@@ -429,6 +427,21 @@ impl Node {
             (*new_leaf).usued.store(1, Relaxed);
         }
         (new_leaf as *mut usize, false)
+    }
+
+    /// Dispatch memory reclain operation. `ptr` should be a boxed raw ptr.
+    pub unsafe fn drop(ptr: *mut usize) {
+        if ptr as usize % 2 != 0 {
+            let ptr = (ptr as usize - 1) as *mut usize as *mut KVPair;
+            drop(Box::from_raw(ptr));
+        } else {
+            match (*(ptr as *mut Node4)).header.node_type {
+                NodeType::Node4 => drop(Box::from_raw(ptr as *mut Node4)),
+                NodeType::Node16 => drop(Box::from_raw(ptr as *mut Node16)),
+                NodeType::Node48 => drop(Box::from_raw(ptr as *mut Node48)),
+                NodeType::Node256 => drop(Box::from_raw(ptr as *mut Node256)),
+            };
+        }
     }
 }
 
@@ -906,6 +919,7 @@ impl Header {
 mod test {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicPtr;
 
     fn empty_node4() -> *mut Node4 {
         Node::make_node4()
@@ -938,16 +952,21 @@ mod test {
         debug_print(node.load(Relaxed));
     }
 
+    // todo: what is the interface of tagging & untagging kvpair's ptr like
+    unsafe fn from_tagged_ptr(node_ref: &NodeRef) -> *mut KVPair {
+        let ptr = **node_ref;
+        debug_assert!(ptr as usize % 2 == 1);
+        (ptr as usize - 1) as *mut usize as _
+    }
+
     #[test]
     fn test_node_insert_from_empty() {
         let root = NodeRef::default();
         let kvpair_ptr = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec()).into_raw();
         Node::insert(&root, &[1, 2, 3, 4], kvpair_ptr, 0).unwrap();
         let result = Node::search(&root.refer(), &[1, 2, 3, 4], 0).unwrap();
-        // todo: move this into `search()`, or move `add_leaf_mark()` out.
-        result.remove_leaf_mark();
         unsafe {
-            assert_eq!(*(*result as *mut KVPair), *kvpair_ptr);
+            assert_eq!(*from_tagged_ptr(&result), *kvpair_ptr);
         }
     }
 
@@ -961,13 +980,11 @@ mod test {
         Node::insert(&root, &[1, 2, 3, 5], kvpair2, 0).unwrap();
 
         let result1 = Node::search(&root, &[1, 2, 3, 4], 0).unwrap();
-        result1.remove_leaf_mark();
         let result2 = Node::search(&root, &[1, 2, 3, 5], 0).unwrap();
-        result2.remove_leaf_mark();
 
         unsafe {
-            assert_eq!(*(*result1 as *mut KVPair), *kvpair1);
-            assert_eq!(*(*result2 as *mut KVPair), *kvpair2);
+            assert_eq!(*from_tagged_ptr(&result1), *kvpair1);
+            assert_eq!(*from_tagged_ptr(&result2), *kvpair2);
         }
     }
 

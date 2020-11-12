@@ -1,4 +1,5 @@
-use std::intrinsics::{atomic_store, atomic_xchg};
+use crate::node::Node;
+use std::intrinsics::atomic_xchg;
 use std::ops::Deref;
 use std::ptr;
 use std::sync::atomic::AtomicUsize;
@@ -33,7 +34,11 @@ impl NodeContainer {
         return false;
     }
 
-    fn reclaim(&self) {}
+    fn reclaim(&self) {
+        if !self.node.is_null() {
+            unsafe { Node::drop(self.node) }
+        }
+    }
 }
 
 /// A reference to underlying `NodeContainer`. This struct itself is not thread safe.
@@ -75,9 +80,9 @@ impl NodeRef {
     }
 
     // below are deprecated
-    pub fn swap(&self, rhs: Self) {}
+    pub fn swap(&self, _rhs: Self) {}
 
-    pub fn replace(&self, rhs: Self) {}
+    pub fn replace(&self, _rhs: Self) {}
 
     // evict self's value (invalid this NodeRef) and return previous value.
     // maybe `into_raw` or `into_inner` is more appropriate?
@@ -85,7 +90,7 @@ impl NodeRef {
         unimplemented!()
     }
 
-    pub fn load(&self, ordering: Ordering) -> *mut usize {
+    pub fn load(&self, _ordering: Ordering) -> *mut usize {
         unsafe { (*self.ptr).node }
     }
     // above are deprecated.
