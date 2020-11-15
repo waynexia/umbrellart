@@ -116,38 +116,38 @@ impl Node {
                 return Ok(());
             }
             let p = Self::check_prefix(&node, key, depth);
-            // todo: remove hard coded "Node4"
             if p != Self::get_prefix_len(&node) {
-                // make a copy of node and modify it,
-                // construct new inner node and replace node
-                let mut node_substitute: Node4 = mem::transmute_copy(&*(**node as *const Node4)); // ?
-                node_substitute.header.prefix_len = p;
-                let node_substitute_ptr = Box::into_raw(Box::new(node_substitute));
-
-                let new_inner_node = NodeRef::new(Self::make_node4() as *mut usize);
-                let node_prefix = Self::get_header(&node).prefix;
-                let header = Self::get_header_mut(*new_inner_node);
-                header.prefix_len = p;
-                Self::get_header_mut(*new_inner_node as *mut usize).prefix_len = p;
-                for i in 0..MAX_PREFIX_STORED.min(p as usize) {
-                    header.prefix[i] = node_prefix[i];
+                // needs to expand collapsed prefix
+                // todo-summary:
+                // - check interaction with MAX_PREFIX_STORED
+                // - check whether the sequence of insert and adjust prefix matter
+                // - maybe need to retrieve entire key when adjusting curr_prefix ?
+                let p = p as usize;
+                let inter_node = NodeRef::new(Node::make_node4() as _);
+                let mut inter_header = Self::get_header_mut_by_noderef(&inter_node);
+                let mut curr_header = Self::get_header_mut_by_noderef(node);
+                let curr_prefix = curr_header.prefix;
+                // todo: should branch for p greater/smaller than MAX_PREFIX_STORED ?
+                // copy prefix
+                for i in 0..p {
+                    inter_header.prefix[i] = curr_prefix[i];
                 }
+                inter_header.prefix_len = p as u32;
 
-                Self::add_child(
-                    &new_inner_node,
-                    key[depth + p as usize],
-                    NodeRef::new(leaf as *mut usize),
-                    true,
-                );
-                Self::add_child(
-                    &new_inner_node,
-                    node_prefix[p as usize],
-                    NodeRef::new(node_substitute_ptr as *mut usize),
-                    false,
-                );
+                // adjust current node's prefix
+                // todo: consider MAX_PREFIX_STORED
+                for i in p..curr_header.prefix_len as usize {
+                    curr_header.prefix[i - p] = curr_header.prefix[p];
+                }
+                curr_header.prefix_len -= p as u32 + 1;
 
-                node.replace_underlying(*new_inner_node as *mut usize);
-                // todo: drop old ptr
+                // link children, maybe need to find a way to insert first then adjust prefix?
+                let leaf = NodeRef::new(leaf as *mut usize);
+                Self::add_child(&inter_node, curr_prefix[depth + p], node.refer(), false);
+                Self::add_child(&inter_node, key[depth + p], leaf, true);
+
+                // replace
+                node.replace_with(inter_node);
                 return Ok(());
             }
 
@@ -311,6 +311,12 @@ impl Node {
 
     fn get_header_mut<'a>(node: *mut usize) -> &'a mut Header {
         unsafe { &mut *(node as *mut Header) }
+    }
+
+    fn get_header_mut_by_noderef(node: &NodeRef) -> &mut Header {
+        debug_assert!(!Self::is_kvpair(node));
+
+        unsafe { &mut *(**node as *mut Header) }
     }
 
     // todo: SIMD
@@ -1008,17 +1014,10 @@ mod test {
         }
     }
 
-    // what is "expand" mean?
     #[test]
-    #[ignore]
-    fn test_node_expand() {
+    fn test_node_expand_collapsed_prefix() {
         let root = NodeRef::default();
-        let kvs = vec![
-            vec![1, 2, 3, 4],
-            vec![1, 2, 1],
-            vec![1, 2, 2],
-            vec![1, 2, 2, 1],
-        ];
+        let kvs = vec![vec![1, 2, 3, 4], vec![1, 2, 1]];
         let mut answer = HashMap::new();
         for kv in &kvs {
             let kvpair_ptr = KVPair::new(kv.to_owned(), kv.to_owned()).into_raw();
@@ -1033,16 +1032,6 @@ mod test {
                 assert_eq!(*from_tagged_ptr(&result), *answer.remove(kv).unwrap());
             }
         }
-
-        //remove
-        // for kv in kvs {
-        //     let result = Node::remove(&root, &kv, 0).unwrap();
-        //     let kvpair = unsafe { &*(result as *mut KVPair) };
-        //     assert_eq!(kvpair.value.as_slice(), kv);
-        //     unsafe {
-        //         let _ = Box::from_raw(result);
-        //     }
-        // }
     }
 
     // #[test]
