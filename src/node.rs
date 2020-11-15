@@ -16,6 +16,7 @@ const MAX_PREFIX_STORED: usize = 10;
 pub struct Node {}
 
 impl Node {
+    /// Search is a `read` operation, the node should be a copy(another referance) of one in tree.
     pub fn search<'a>(node: &NodeRef, key: &[u8], depth: usize) -> Option<NodeRef> {
         if node.is_null() {
             info!("search encounted a null ptr");
@@ -50,6 +51,17 @@ impl Node {
         }
         // step
         let depth = depth + Self::get_prefix_len(&node) as usize;
+        // check leaf for sub-string.
+        // todo: can avoid double check? (checked above)
+        if depth == key.len() {
+            if Self::is_leaf_match(&node, key) {
+                let leaf = Self::to_node4(&node).leaf.refer();
+                debug_assert!(!leaf.is_null());
+                return Some(leaf);
+            } else {
+                return None;
+            }
+        }
         let next = Self::find_child(&node, &key[depth])?;
         // another lazy expansion?
         if Node::is_kvpair(&next) {
@@ -139,7 +151,15 @@ impl Node {
                 return Ok(());
             }
 
-            let depth = depth + Self::get_prefix_len(&node) as usize;
+            let depth = depth + p as usize;
+            if depth == key.len() {
+                // substring case
+                let leaf = NodeRef::new(leaf as *mut usize);
+                leaf.add_leaf_mark();
+                let node = &*(**node as *mut _ as *mut Node4);
+                node.leaf.replace_with(leaf);
+                return Ok(());
+            }
             if let Some(next_node) = Self::find_child(&node, &key[depth]) {
                 Self::insert(&next_node, key, leaf, depth + 1)?;
             } else {
@@ -209,10 +229,10 @@ impl Node {
             Self::to_kvpair(node).key.as_slice() == key
         } else {
             let leaf = &Self::to_node4(node).leaf;
+            debug_assert!(Self::is_kvpair(leaf));
             if !(*leaf).is_null() {
                 Self::to_kvpair(&leaf).key.as_slice() == key
             } else {
-                // assert leaf exist?
                 false
             }
         }
@@ -979,8 +999,8 @@ mod test {
         let kvpair2 = KVPair::new([1, 2, 3, 5].to_vec(), [1, 2, 3, 5].to_vec()).into_raw();
         Node::insert(&root, &[1, 2, 3, 5], kvpair2, 0).unwrap();
 
-        let result1 = Node::search(&root, &[1, 2, 3, 4], 0).unwrap();
-        let result2 = Node::search(&root, &[1, 2, 3, 5], 0).unwrap();
+        let result1 = Node::search(&root.refer(), &[1, 2, 3, 4], 0).unwrap();
+        let result2 = Node::search(&root.refer(), &[1, 2, 3, 5], 0).unwrap();
 
         unsafe {
             assert_eq!(*from_tagged_ptr(&result1), *kvpair1);
@@ -988,33 +1008,30 @@ mod test {
         }
     }
 
+    // what is "expand" mean?
     #[test]
     #[ignore]
     fn test_node_expand() {
         let root = NodeRef::default();
-
         let kvs = vec![
             vec![1, 2, 3, 4],
             vec![1, 2, 1],
             vec![1, 2, 2],
             vec![1, 2, 2, 1],
         ];
-
         let mut answer = HashMap::new();
         for kv in &kvs {
-            // debug_print_atomic(&root);
-            // let kvpair = KVPair::new(kv.to_owned(), kv.to_owned());
-            // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
             let kvpair_ptr = KVPair::new(kv.to_owned(), kv.to_owned()).into_raw();
-            answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
+            answer.insert(kv.to_owned(), kvpair_ptr);
             Node::insert(&root, &kv, kvpair_ptr, 0).unwrap();
         }
 
         // search
         for kv in &kvs {
             let result = Node::search(&root.refer(), kv, 0).unwrap();
-            println!("result: {:?}", *result);
-            // assert_eq!(result, *answer.get(kv).unwrap());
+            unsafe {
+                assert_eq!(*from_tagged_ptr(&result), *answer.remove(kv).unwrap());
+            }
         }
 
         //remove
@@ -1065,6 +1082,43 @@ mod test {
     //         }
     //     }
     // }
+
+    // original paper seems not considering substring.
+    #[test]
+    fn test_node_substring_no_grow() {
+        // short first
+        let root = NodeRef::default();
+        let kvpair1 = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec()).into_raw();
+        Node::insert(&root, &[1, 2, 3, 4], kvpair1, 0).unwrap();
+
+        let kvpair2 = KVPair::new([1, 2, 3, 4, 5].to_vec(), [1, 2, 3, 4, 5].to_vec()).into_raw();
+        Node::insert(&root, &[1, 2, 3, 4, 5], kvpair2, 0).unwrap();
+
+        let result1 = Node::search(&root.refer(), &[1, 2, 3, 4], 0).unwrap();
+        let result2 = Node::search(&root.refer(), &[1, 2, 3, 4, 5], 0).unwrap();
+
+        unsafe {
+            assert_eq!(*from_tagged_ptr(&result1), *kvpair1);
+            assert_eq!(*from_tagged_ptr(&result2), *kvpair2);
+        }
+        drop(root);
+
+        // long first
+        let root = NodeRef::default();
+        let kvpair1 = KVPair::new([1, 2, 3, 4, 5].to_vec(), [1, 2, 3, 4, 5].to_vec()).into_raw();
+        Node::insert(&root, &[1, 2, 3, 4, 5], kvpair1, 0).unwrap();
+
+        let kvpair2 = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec()).into_raw();
+        Node::insert(&root, &[1, 2, 3, 4], kvpair2, 0).unwrap();
+
+        let result1 = Node::search(&root.refer(), &[1, 2, 3, 4, 5], 0).unwrap();
+        let result2 = Node::search(&root.refer(), &[1, 2, 3, 4], 0).unwrap();
+
+        unsafe {
+            assert_eq!(*from_tagged_ptr(&result1), *kvpair1);
+            assert_eq!(*from_tagged_ptr(&result2), *kvpair2);
+        }
+    }
 
     // #[test]
     // fn test_node_substring() {
