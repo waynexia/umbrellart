@@ -434,7 +434,7 @@ impl Node {
         node.replace_with(grown_node);
     }
 
-    // retrive any child of given node.
+    // retrive any child of given noexport RUSTFLAGS="-Zinstrument-coverage"de.
     // this is for getting a omitted prefix of a node.
     fn any_child(node: &NodeRef) -> Option<&NodeRef> {
         let mut curr = node;
@@ -494,6 +494,7 @@ impl Node {
         }
 
         let leaf_node = NodeRef::new(leaf as _);
+        NodeRef::add_leaf_mark(&leaf_node);
         let new_leaf = Self::make_node4();
         unsafe {
             let header = Self::get_header_mut(new_leaf as *mut usize);
@@ -1273,40 +1274,41 @@ mod test {
         }
     }
 
-    // #[test]
-    // fn test_node_collapse() {
-    //     let root = AtomicPtr::new(empty_node4() as *mut usize);
-    //     Node::init(&root, &[1], &[0]);
+    #[test]
+    fn test_node_collapse() {
+        let root = NodeRef::default();
+        let kvs = vec![
+            vec![1],
+            vec![0, 0],
+            vec![0, 0, 0, 0],
+            vec![3, 3, 3, 3],
+            vec![4, 4, 4, 4, 4],
+        ];
 
-    //     let kvs = vec![
-    //         vec![0, 0],
-    //         vec![0, 0, 0, 0],
-    //         vec![3, 3, 3, 3],
-    //         vec![4, 4, 4, 4, 4],
-    //     ];
+        // insert
+        let mut answer = HashMap::new();
+        for k in &kvs {
+            let kvpair_ptr = KVPair::new(k.to_vec(), k.to_vec()).into_raw();
+            answer.insert(k.to_owned(), kvpair_ptr);
+            Node::insert(&root, k, kvpair_ptr, 0).unwrap();
+        }
 
-    //     let mut answer = HashMap::new();
-    //     for k in &kvs {
-    //         // let kvpair = KVPair::new(k.to_vec(), k.to_vec());
-    //         // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
-    //         let kvpair_ptr = KVPair::new(k.to_vec(), k.to_vec()).into_raw();
-    //         answer.insert(k.to_owned(), kvpair_ptr as *mut usize);
-    //         Node::insert(&root, k, kvpair_ptr, 0).unwrap();
-    //     }
+        // search
+        for k in &kvs {
+            let result = Node::search(&root, k, 0).unwrap();
+            unsafe {
+                assert_eq!(*from_tagged_ptr(&result), **answer.get(k).unwrap());
+            }
+        }
 
-    //     for k in &kvs {
-    //         let result = Node::search(&root, k, 0);
-    //         assert_eq!(result.unwrap(), *answer.get(k).unwrap());
-    //     }
-
-    //     // remove
-    //     for kv in &kvs {
-    //         let result = Node::remove(&root, kv, 0).unwrap();
-    //         let kvpair = unsafe { &*(result as *mut KVPair) };
-    //         assert_eq!(&kvpair.value, kv);
-    //         unsafe {
-    //             let _ = Box::from_raw(result);
-    //         }
-    //     }
-    // }
+        // remove
+        // for kv in &kvs {
+        //     let result = Node::remove(&root, kv, 0).unwrap();
+        //     let kvpair = unsafe { &*(result as *mut KVPair) };
+        //     assert_eq!(&kvpair.value, kv);
+        //     unsafe {
+        //         let _ = Box::from_raw(result);
+        //     }
+        // }
+    }
 }
