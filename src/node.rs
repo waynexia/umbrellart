@@ -430,7 +430,8 @@ impl Node {
             NodeType::Node256 => unreachable!("Node256 cannot grow"),
         };
 
-        node.replace_underlying(grown);
+        let grown_node = NodeRef::new(grown);
+        node.replace_with(grown_node);
     }
 
     // retrive any child of given node.
@@ -492,6 +493,7 @@ impl Node {
             return (leaf as *mut usize, true);
         }
 
+        let leaf_node = NodeRef::new(leaf as _);
         let new_leaf = Self::make_node4();
         unsafe {
             let header = Self::get_header_mut(new_leaf as *mut usize);
@@ -501,7 +503,7 @@ impl Node {
                 header.prefix[i] = key[i + depth];
             }
             (*new_leaf).key[0].store(key[depth], Relaxed);
-            (*new_leaf).child[0].replace_underlying((leaf as usize + 1) as *mut usize);
+            (*new_leaf).child[0].replace_with(leaf_node);
             (*new_leaf).mask.store(1, Relaxed);
             (*new_leaf).usued.store(1, Relaxed);
         }
@@ -621,7 +623,7 @@ impl Node4 {
             for i in 0..4 {
                 if mask >> i & 1 == 1 {
                     (*new_node).key[cnt].store(fulled_node.key[i].load(Relaxed), Relaxed);
-                    (*new_node).child[cnt].replace_underlying(*fulled_node.child[i]);
+                    (*new_node).child[cnt].replace_with(fulled_node.child[i].refer());
                     cnt += 1;
                 }
             }
@@ -737,7 +739,7 @@ impl Node16 {
             let mut cnt = 0;
             for i in 0..16 {
                 if mask >> i & 1 == 1 {
-                    (*new_node).child[cnt].replace_underlying(*fulled_node.child[i]);
+                    (*new_node).child[cnt].replace_with(fulled_node.child[i].refer());
                     (*new_node).key[fulled_node.key[cnt].load(Relaxed) as usize]
                         .store(i as i8, Relaxed);
                     cnt += 1;
@@ -863,7 +865,8 @@ impl Node48 {
 
     pub fn grow(node: &NodeRef) -> *mut usize {
         let new_node = Box::into_raw(Box::new(Node256::new()));
-        let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node48) };
+        // let fulled_node = unsafe { &*(node.load(Relaxed) as *const Node48) };
+        let fulled_node = unsafe { &*(**node as *const Node48) };
 
         // copy header
         unsafe {
@@ -874,8 +877,8 @@ impl Node48 {
             // child field
             for i in 0..=255 {
                 if fulled_node.key[i].load(Relaxed) >= 0 {
-                    (*new_node).child[i].replace_underlying(
-                        fulled_node.child[fulled_node.key[i].load(Relaxed) as usize].load(Relaxed),
+                    (*new_node).child[i].replace_with(
+                        fulled_node.child[fulled_node.key[i].load(Relaxed) as usize].refer(),
                     );
                 }
             }
@@ -1147,43 +1150,41 @@ mod test {
         }
     }
 
-    // #[test]
-    // fn test_node_grow() {
-    //     let root = AtomicPtr::new(empty_node4() as *mut usize);
-    //     Node::init(&root, &[1, 1, 1, 0], &[1, 1, 1, 0]);
+    #[test]
+    fn simple_grow() {
+        let root = NodeRef::default();
 
-    //     let mut kvs = [[1, 1, 1, 1]; 255];
-    //     for i in 1..=255 {
-    //         kvs[i - 1][3] = i as u8;
-    //     }
+        let mut kvs = [[1, 1, 1, 1]; 255];
+        for i in 0..255 {
+            kvs[i][3] = i as u8;
+        }
 
-    //     // insert
-    //     let mut answer = HashMap::new();
-    //     for kv in &kvs {
-    //         debug_print_atomic(&root);
-    //         // let kvpair = KVPair::new(kv.to_vec(), kv.to_vec());
-    //         // let kvpair_ptr = Box::into_raw(Box::new(kvpair));
-    //         let kvpair_ptr = KVPair::new(kv.to_vec(), kv.to_vec()).into_raw();
-    //         answer.insert(kv.to_owned(), kvpair_ptr as *mut usize);
-    //         Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
-    //     }
+        // insert
+        let mut answer = HashMap::new();
+        for kv in &kvs {
+            let kvpair_ptr = KVPair::new(kv.to_vec(), kv.to_vec()).into_raw();
+            answer.insert(kv.to_owned(), kvpair_ptr);
+            Node::insert(&root, kv, kvpair_ptr, 0).unwrap();
+        }
 
-    //     // search
-    //     for kv in &kvs {
-    //         let result = Node::search(&root, kv, 0);
-    //         assert_eq!(result.unwrap(), *answer.get(kv).unwrap());
-    //     }
+        // search
+        for kv in &kvs {
+            let result = Node::search(&root.refer(), kv, 0).unwrap();
+            unsafe {
+                assert_eq!(*from_tagged_ptr(&result), **answer.get(kv).unwrap());
+            }
+        }
 
-    //     //remove
-    //     for kv in &kvs {
-    //         let result = Node::remove(&root, kv, 0).unwrap();
-    //         let kvpair = unsafe { &*(result as *mut KVPair) };
-    //         assert_eq!(kvpair.value.as_slice(), kv);
-    //         unsafe {
-    //             let _ = Box::from_raw(result);
-    //         }
-    //     }
-    // }
+        //remove
+        // for kv in &kvs {
+        //     let result = Node::remove(&root, kv, 0).unwrap();
+        //     let kvpair = unsafe { &*(result as *mut KVPair) };
+        //     assert_eq!(kvpair.value.as_slice(), kv);
+        //     unsafe {
+        //         let _ = Box::from_raw(result);
+        //     }
+        // }
+    }
 
     // original paper seems not considering substring.
     #[test]

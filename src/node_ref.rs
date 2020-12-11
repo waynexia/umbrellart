@@ -58,6 +58,8 @@ pub struct NodeRef {
 }
 
 impl NodeRef {
+    /// Create a `NodeRef` to maintain given node ptr. That pointer should be
+    /// boxed into heap.
     pub fn new(node: *mut usize) -> Self {
         let container = NodeContainer::new(node);
         let ptr = Box::into_raw(Box::new(container));
