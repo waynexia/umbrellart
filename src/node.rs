@@ -1062,40 +1062,8 @@ impl Header {
 mod test {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicPtr;
 
-    fn empty_node4() -> *mut Node4 {
-        Node::make_node4()
-    }
-
-    fn debug_print(node_ptr: *mut usize) {
-        unsafe {
-            match (node_ptr as *mut Header).as_ref().unwrap().node_type {
-                NodeType::Node4 => {
-                    let node = (node_ptr as *mut Node4).as_ref().unwrap();
-                    debug!("Node4: {:?}", node);
-                }
-                NodeType::Node16 => {
-                    let node = (node_ptr as *mut Node16).as_ref().unwrap();
-                    debug!("Node4: {:?}", node);
-                }
-                NodeType::Node48 => {
-                    let node = (node_ptr as *mut Node48).as_ref().unwrap();
-                    debug!("Node4: {:?}", node);
-                }
-                NodeType::Node256 => {
-                    let node = (node_ptr as *mut Node256).as_ref().unwrap();
-                    debug!("Node4: {:?}", node);
-                }
-            }
-        }
-    }
-
-    fn debug_print_atomic(node: &AtomicPtr<usize>) {
-        debug_print(node.load(Relaxed));
-    }
-
-    // todo: what is the interface of tagging & untagging kvpair's ptr like
+    // todo: consider what is the interface of tagging & untagging kvpair's ptr like
     unsafe fn from_tagged_ptr(node_ref: &NodeRef) -> *mut KVPair {
         let ptr = **node_ref;
         debug_assert!(ptr as usize % 2 == 1);
@@ -1103,7 +1071,7 @@ mod test {
     }
 
     #[test]
-    fn test_node_insert_from_empty() {
+    fn bootstarp_from_empty() {
         let root = NodeRef::default();
         let kvpair_ptr = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec()).into_raw();
         Node::insert(&root, &[1, 2, 3, 4], kvpair_ptr, 0).unwrap();
@@ -1114,7 +1082,7 @@ mod test {
     }
 
     #[test]
-    fn test_node_simple_insert_two() {
+    fn insert_two_item_in_one_level() {
         let root = NodeRef::default();
         let kvpair1 = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec()).into_raw();
         Node::insert(&root, &[1, 2, 3, 4], kvpair1, 0).unwrap();
@@ -1132,7 +1100,7 @@ mod test {
     }
 
     #[test]
-    fn test_node_expand_collapsed_prefix() {
+    fn expand_collapsed_prefix_by_two_item() {
         let root = NodeRef::default();
         let kvs = vec![vec![1, 2, 3, 4], vec![1, 2, 1]];
         let mut answer = HashMap::new();
@@ -1152,7 +1120,7 @@ mod test {
     }
 
     #[test]
-    fn simple_grow() {
+    fn grow_from_4_to_256() {
         let root = NodeRef::default();
 
         let mut kvs = [[1, 1, 1, 1]; 255];
@@ -1189,7 +1157,7 @@ mod test {
 
     // original paper seems not considering substring.
     #[test]
-    fn test_node_substring_no_grow() {
+    fn insert_two_substring_items() {
         // short first
         let root = NodeRef::default();
         let kvpair1 = KVPair::new([1, 2, 3, 4].to_vec(), [1, 2, 3, 4].to_vec()).into_raw();
@@ -1225,7 +1193,7 @@ mod test {
     }
 
     #[test]
-    fn many_substring_no_grow() {
+    fn many_substring() {
         let root = NodeRef::default();
         let test_size = 100;
 
@@ -1275,7 +1243,7 @@ mod test {
     }
 
     #[test]
-    fn test_node_collapse() {
+    fn expand_collapsed_node_with_other_unrelative_items() {
         let root = NodeRef::default();
         let kvs = vec![
             vec![1],
