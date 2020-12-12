@@ -114,6 +114,7 @@ impl Node {
                 node.replace_with(new_inner_ref);
                 return Ok(());
             }
+            // p is the length of matched prefix.
             let p = Self::check_prefix(&node, key, depth);
             if p != Self::get_prefix_len(&node) {
                 // needs to expand collapsed prefix
@@ -126,7 +127,7 @@ impl Node {
                 // copy prefix,
                 // for p > MAX_PREFIX_STORED, means new inter node's prefix needn't to change,
                 // otherwise it is a subset of curr_prefix.
-                let mut curr_prefix = curr_header.prefix;
+                let curr_prefix = &mut curr_header.prefix;
                 if p as usize > MAX_PREFIX_STORED {
                     for i in 0..MAX_PREFIX_STORED {
                         inter_header.prefix[i] = curr_prefix[i];
@@ -143,12 +144,11 @@ impl Node {
                 let any_child = Node::any_child(&node).unwrap();
                 let complete_key = &Node::to_kvpair(any_child).key;
                 for i in 0..new_curr_prefix_len.min(MAX_PREFIX_STORED as u32 - 1) as usize {
-                    curr_prefix[i] = complete_key[p as usize + i];
+                    curr_prefix[i] = complete_key[p as usize + i + 1];
                 }
                 curr_header.prefix_len = new_curr_prefix_len;
 
                 // link children, maybe need to find a way to insert first then adjust prefix?
-                let leaf = NodeRef::new(leaf as *mut usize);
                 // if p equals to key.len(), the `leaf` is going to be a leaf in `node`
                 let bias = if p as usize == key.len() { 1 } else { 0 };
                 Self::add_child(
@@ -158,10 +158,18 @@ impl Node {
                     false,
                 );
                 if bias == 1 {
+                    let leaf = NodeRef::new(leaf as *mut usize);
                     leaf.add_leaf_mark();
                     Node::to_node4(&inter_node).leaf.replace_with(leaf);
                 } else {
-                    Self::add_child(&inter_node, key[depth + p as usize - bias], leaf, true);
+                    let (new_leaf_node, is_kvpair) =
+                        Self::make_new_leaf(key, leaf, depth + p as usize + 1);
+                    Self::add_child(
+                        &inter_node,
+                        key[depth + p as usize],
+                        NodeRef::new(new_leaf_node),
+                        is_kvpair,
+                    );
                 }
 
                 // replace
@@ -503,7 +511,7 @@ impl Node {
             for i in 0..header.prefix_len as usize {
                 header.prefix[i] = key[i + depth];
             }
-            (*new_leaf).key[0].store(key[depth], Relaxed);
+            (*new_leaf).key[0].store(key[depth + header.prefix_len as usize], Relaxed);
             (*new_leaf).child[0].replace_with(leaf_node);
             (*new_leaf).mask.store(1, Relaxed);
             (*new_leaf).usued.store(1, Relaxed);
@@ -1278,5 +1286,32 @@ mod test {
         //         let _ = Box::from_raw(result);
         //     }
         // }
+    }
+
+    // reason: when writing/adjusting a new node's prefix, and may following a insert
+    // (like make a inner node and add `leaf` to insert to its child). Prefix length
+    // is not processed correctlly. Like considering bits used by prefix, or add depth
+    // by one as the new node is belongs to next level.
+    #[test]
+    fn case_from_fuzz_1() {
+        let keys = vec![
+            vec![255, 10, 255, 255, 255, 255, 7, 7, 7],
+            vec![255, 255, 255, 7],
+        ];
+        let root = NodeRef::default();
+        let mut answer = HashMap::new();
+
+        for key in &keys {
+            let kvpair_ptr = KVPair::new(key.to_vec(), key.to_vec()).into_raw();
+            answer.insert(key.to_owned(), kvpair_ptr);
+            Node::insert(&root, &key, kvpair_ptr, 0).unwrap();
+        }
+
+        for key in keys {
+            let result = Node::search(&root.refer(), &key, 0).unwrap();
+            unsafe {
+                assert_eq!(*from_tagged_ptr(&result), **answer.get(&key).unwrap());
+            }
+        }
     }
 }
