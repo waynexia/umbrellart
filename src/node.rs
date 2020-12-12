@@ -42,6 +42,11 @@ impl Node {
         }
         // check compressed path pessimistically
         if Self::check_prefix(&node, key, depth) != Self::get_prefix_len(&node) {
+            println!(
+                "prefix not match, {} != {}",
+                Self::check_prefix(&node, key, depth),
+                Self::get_prefix_len(&node)
+            );
             debug!(
                 "prefix not match, {} != {}",
                 Self::check_prefix(&node, key, depth),
@@ -108,8 +113,14 @@ impl Node {
                 let new_inner_node = &mut *(new_inner_node_ptr as *mut Node4);
                 new_inner_node.leaf.replace_with(node.refer());
                 let new_inner_ref = NodeRef::new(new_inner_node_ptr);
-                let leaf = NodeRef::new(leaf as *mut usize);
-                Self::add_child(&new_inner_ref, *key.last().unwrap(), leaf, true);
+                let (new_leaf_node, is_kvpair) = Self::make_new_leaf(key, leaf, depth + 1);
+                Self::add_child(
+                    &new_inner_ref,
+                    key[depth],
+                    NodeRef::new(new_leaf_node),
+                    is_kvpair,
+                );
+
                 // swap
                 node.replace_with(new_inner_ref);
                 return Ok(());
@@ -143,7 +154,7 @@ impl Node {
                 let new_curr_prefix_len = curr_header.prefix_len - p - 1;
                 let any_child = Node::any_child(&node).unwrap();
                 let complete_key = &Node::to_kvpair(any_child).key;
-                for i in 0..new_curr_prefix_len.min(MAX_PREFIX_STORED as u32 - 1) as usize {
+                for i in 0..new_curr_prefix_len.min(MAX_PREFIX_STORED as u32) as usize {
                     curr_prefix[i] = complete_key[p as usize + i + 1];
                 }
                 curr_header.prefix_len = new_curr_prefix_len;
@@ -501,6 +512,8 @@ impl Node {
             return (leaf as *mut usize, true);
         }
 
+        println!("{}, {}", key.len(), depth);
+
         let leaf_node = NodeRef::new(leaf as _);
         NodeRef::add_leaf_mark(&leaf_node);
         let new_leaf = Self::make_node4();
@@ -508,7 +521,7 @@ impl Node {
             let header = Self::get_header_mut(new_leaf as *mut usize);
             header.count = 1;
             header.prefix_len = (key.len() - depth - 1) as u32;
-            for i in 0..header.prefix_len as usize {
+            for i in 0..header.prefix_len.min(MAX_PREFIX_STORED as u32) as usize {
                 header.prefix[i] = key[i + depth];
             }
             (*new_leaf).key[0].store(key[depth + header.prefix_len as usize], Relaxed);
@@ -1293,10 +1306,90 @@ mod test {
     // is not processed correctlly. Like considering bits used by prefix, or add depth
     // by one as the new node is belongs to next level.
     #[test]
-    fn case_from_fuzz_1() {
+    fn fuzz_case_1() {
         let keys = vec![
             vec![255, 10, 255, 255, 255, 255, 7, 7, 7],
             vec![255, 255, 255, 7],
+        ];
+        let root = NodeRef::default();
+        let mut answer = HashMap::new();
+
+        for key in &keys {
+            let kvpair_ptr = KVPair::new(key.to_vec(), key.to_vec()).into_raw();
+            answer.insert(key.to_owned(), kvpair_ptr);
+            Node::insert(&root, &key, kvpair_ptr, 0).unwrap();
+        }
+
+        for key in keys {
+            let result = Node::search(&root.refer(), &key, 0).unwrap();
+            unsafe {
+                assert_eq!(*from_tagged_ptr(&result), **answer.get(&key).unwrap());
+            }
+        }
+    }
+
+    // reason: `MAX_PREFIX_STORED` has not been took into consideration at `make_new_leaf()`
+    #[test]
+    fn fuzz_case_2() {
+        let keys = vec![
+            vec![255, 0, 255],
+            vec![
+                255, 255, 7, 10, 10, 96, 10, 10, 10, 0, 10, 0, 0, 96, 10, 10, 10, 10, 10, 10, 7,
+                255, 255, 10, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        ];
+        let root = NodeRef::default();
+        let mut answer = HashMap::new();
+
+        for key in &keys {
+            let kvpair_ptr = KVPair::new(key.to_vec(), key.to_vec()).into_raw();
+            answer.insert(key.to_owned(), kvpair_ptr);
+            Node::insert(&root, &key, kvpair_ptr, 0).unwrap();
+        }
+
+        for key in keys {
+            let result = Node::search(&root.refer(), &key, 0).unwrap();
+            unsafe {
+                assert_eq!(*from_tagged_ptr(&result), **answer.get(&key).unwrap());
+            }
+        }
+    }
+
+    // reason: a mistake `minus 1` over `MAX_PREFIX_STORED`. That is added when handling previous
+    // test and seems not correct.
+    #[test]
+    fn fuzz_case_3() {
+        let keys = vec![
+            // `255` * 10 + `7` * 2
+            vec![255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 7, 7],
+            vec![120],
+        ];
+        let root = NodeRef::default();
+        let mut answer = HashMap::new();
+
+        for key in &keys {
+            let kvpair_ptr = KVPair::new(key.to_vec(), key.to_vec()).into_raw();
+            answer.insert(key.to_owned(), kvpair_ptr);
+            Node::insert(&root, &key, kvpair_ptr, 0).unwrap();
+        }
+
+        for key in keys {
+            let result = Node::search(&root.refer(), &key, 0).unwrap();
+            unsafe {
+                assert_eq!(*from_tagged_ptr(&result), **answer.get(&key).unwrap());
+            }
+        }
+    }
+
+    // reason: forget to call `make_new_leaf()` when making a leaf node.
+    #[test]
+    fn fuzz_case_4() {
+        let keys = vec![
+            vec![255],
+            vec![
+                255, 255, 255, 255, 255, 255, 7, 7, 7, 7, 7, 7, 7, 160, 255, 11, 136, 135, 135, 3,
+                255, 255, 120, 10, 10, 10, 255, 10, 10, 0, 0, 7, 255, 0,
+            ],
         ];
         let root = NodeRef::default();
         let mut answer = HashMap::new();
