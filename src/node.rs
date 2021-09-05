@@ -1,12 +1,13 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
-#[allow(unused_imports)]
-use std::fmt::Debug;
 use std::mem::{self, MaybeUninit};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicI8, AtomicU16, AtomicU8};
+#[allow(unused_imports)]
+use std::{fmt::Debug, path::Prefix};
 
 use crate::node_ref::NodeRef;
+use crate::utils::PrefixArray;
 
 use log::{debug, info};
 
@@ -95,10 +96,9 @@ impl Node {
             let inner_node = NodeRef::new(inner_node_ptr as *mut usize);
             let header = Self::get_header_mut(inner_node_ptr as *mut usize);
             header.count = 1;
-            header.prefix_len = key.len() as u32 - 1;
-            for i in 0..MAX_PREFIX_STORED.min(key.len() - 1) {
-                header.prefix[i] = key[i];
-            }
+            // header.prefix.set_len(key.len() as u32 - 1);
+            // header.prefix.set_prerix(key);
+            header.prefix.set_values(&key[..key.len() - 1]);
             Self::add_child(&inner_node, *key.last().unwrap(), leaf, true);
 
             node.replace_with(inner_node);
@@ -133,31 +133,41 @@ impl Node {
                 // - check whether the sequence of insert and adjust prefix matter
 
                 let inter_node = NodeRef::new(Node::make_node4() as _);
-                let mut inter_header = Self::get_header_mut_by_noderef(&inter_node);
-                let mut curr_header = Self::get_header_mut_by_noderef(node);
+                let inter_header = Self::get_header_mut_by_noderef(&inter_node);
+                let curr_header = Self::get_header_mut_by_noderef(node);
                 // copy prefix,
                 // for p > MAX_PREFIX_STORED, means new inter node's prefix needn't to change,
                 // otherwise it is a subset of curr_prefix.
                 let curr_prefix = &mut curr_header.prefix;
-                if p as usize > MAX_PREFIX_STORED {
-                    for i in 0..MAX_PREFIX_STORED {
-                        inter_header.prefix[i] = curr_prefix[i];
-                    }
-                } else {
-                    for i in 0..p as usize {
-                        inter_header.prefix[i] = curr_prefix[i];
-                    }
-                }
-                inter_header.prefix_len = p as u32;
+                // if p as usize > MAX_PREFIX_STORED {
+                //     for i in 0..MAX_PREFIX_STORED {
+                //         inter_header.prefix[i] = curr_prefix[i];
+                //     }
+                // } else {
+                //     for i in 0..p as usize {
+                //         inter_header.prefix[i] = curr_prefix[i];
+                //     }
+                // }
+                // inter_header.prefix.set_len(p);
+                // inter_header.prefix.set_prerix(curr_prefix.values());
+                inter_header.prefix.set_values(curr_prefix.values());
 
                 // adjust current node's prefix
-                let new_curr_prefix_len = curr_header.prefix_len - p - 1;
+                let new_curr_prefix_len = curr_prefix.len() - p - 1;
                 let any_child = Node::any_child(&node).unwrap();
                 let complete_key = &Node::to_kvpair(any_child).key;
-                for i in 0..new_curr_prefix_len.min(MAX_PREFIX_STORED as u32) as usize {
-                    curr_prefix[i] = complete_key[p as usize + i + 1];
+                // for i in 0..new_curr_prefix_len.min(MAX_PREFIX_STORED as u32) as usize {
+                // curr_prefix[i] = complete_key[p as usize + i + 1];
+                // curr_prefix.set_len(new_curr_prefix_len);
+                // curr_prefix.set_prerix(
+                //     &complete_key[(p as usize + 1)..(p + new_curr_prefix_len) as usize],
+                // );
+                if new_curr_prefix_len > 0 {
+                    curr_prefix.set_values(
+                        &complete_key[(p as usize + 1)..(p + new_curr_prefix_len) as usize],
+                    );
                 }
-                curr_header.prefix_len = new_curr_prefix_len;
+                // }
 
                 // link children, maybe need to find a way to insert first then adjust prefix?
                 // if p equals to key.len(), the `leaf` is going to be a leaf in `node`
@@ -297,22 +307,21 @@ impl Node {
         assert!(!Self::is_kvpair(node));
 
         let header = unsafe { &*(**node as *const Header) };
-        for i in 0..key
-            .len()
-            .min(header.prefix_len as usize)
-            .min(MAX_PREFIX_STORED)
+        let min_length = key.len().min(header.prefix.len() as usize);
+        for i in 0..key.len().min(header.prefix.len() as usize)
+        // .min(MAX_PREFIX_STORED)
         {
-            if header.prefix[i] != key[depth + i] {
+            if header.prefix.value(i + depth) != key[depth + i] {
                 return i as u32;
             }
         }
-        return header.prefix_len.min(key.len() as u32);
+        return min_length as u32;
     }
 
     fn get_prefix_len(node: &NodeRef) -> PrefixCount {
         assert!(!Self::is_kvpair(node));
 
-        unsafe { (*(**node as *const Header)).prefix_len }
+        unsafe { (*(**node as *const Header)).prefix.len() }
     }
 
     fn find_child<'a>(node_ptr: &'a NodeRef, key_byte: &u8) -> Option<&'a NodeRef> {
@@ -520,11 +529,14 @@ impl Node {
         unsafe {
             let header = Self::get_header_mut(new_leaf as *mut usize);
             header.count = 1;
-            header.prefix_len = (key.len() - depth - 1) as u32;
-            for i in 0..header.prefix_len.min(MAX_PREFIX_STORED as u32) as usize {
-                header.prefix[i] = key[i + depth];
-            }
-            (*new_leaf).key[0].store(key[depth + header.prefix_len as usize], Relaxed);
+            // header.prefix_len = (key.len() - depth - 1) as u32;
+            // for i in 0..header.prefix_len.min(MAX_PREFIX_STORED as u32) as usize {
+            //     header.prefix[i] = key[i + depth];
+            // }
+            // header.prefix.set_len((key.len() - depth - 1) as u32);
+            // header.prefix.set_prerix(&key[depth..]);
+            header.prefix.set_values(&key[depth..]);
+            (*new_leaf).key[0].store(key[depth + header.prefix.len() as usize], Relaxed);
             (*new_leaf).child[0].replace_with(leaf_node);
             (*new_leaf).mask.store(1, Relaxed);
             (*new_leaf).usued.store(1, Relaxed);
@@ -1055,8 +1067,7 @@ struct Header {
     // item count
     // todo: change `count` to u8
     count: u16,
-    prefix_len: PrefixCount,
-    prefix: [u8; MAX_PREFIX_STORED],
+    prefix: PrefixArray,
 }
 
 impl Header {
@@ -1064,18 +1075,18 @@ impl Header {
         Self {
             node_type,
             count: 0,
-            prefix_len: 0,
-            prefix: [0; 10],
+            prefix: PrefixArray::default(),
         }
     }
 
     pub fn copy_from(&mut self, src: *mut usize) {
         let src_header = unsafe { &(*(src as *mut Node4)).header };
         self.count = src_header.count;
-        self.prefix_len = src_header.prefix_len;
-        for i in 0..MAX_PREFIX_STORED.min(src_header.prefix_len as usize) {
-            self.prefix[i] = src_header.prefix[i];
-        }
+        // self.prefix_len = src_header.prefix_len;
+        // for i in 0..MAX_PREFIX_STORED.min(src_header.prefix_len as usize) {
+        //     self.prefix[i] = src_header.prefix[i];
+        // }
+        self.prefix = PrefixArray::copy_from(&src_header.prefix);
     }
 }
 
@@ -1401,6 +1412,38 @@ mod test {
         }
 
         for key in keys {
+            let result = Node::search(&root.refer(), &key, 0).unwrap();
+            unsafe {
+                assert_eq!(*from_tagged_ptr(&result), **answer.get(&key).unwrap());
+            }
+        }
+    }
+
+    #[ignore]
+    #[test]
+    fn fuzz_case_5() {
+        // commom prefix: `255` * 13
+        let keys = vec![
+            vec![
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 7, 7, 7, 7, 7, 255,
+            ],
+            vec![
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 11, 120, 120,
+                120, 255,
+            ],
+        ];
+        let root = NodeRef::default();
+        let mut answer = HashMap::new();
+
+        for key in &keys {
+            println!("insert: {:?}", key);
+            let kvpair_ptr = KVPair::new(key.to_vec(), key.to_vec()).into_raw();
+            answer.insert(key.to_owned(), kvpair_ptr);
+            Node::insert(&root, &key, kvpair_ptr, 0).unwrap();
+        }
+
+        for key in keys {
+            println!("search: {:?}", key);
             let result = Node::search(&root.refer(), &key, 0).unwrap();
             unsafe {
                 assert_eq!(*from_tagged_ptr(&result), **answer.get(&key).unwrap());

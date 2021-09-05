@@ -4,6 +4,7 @@
 
 mod node;
 mod node_ref;
+mod utils;
 
 pub use node::*;
 // for fuzz test. should not export.
