@@ -1,5 +1,8 @@
 #![feature(core_intrinsics)]
 #![feature(crate_visibility_modifier)]
+#![feature(nonnull_slice_from_raw_parts)]
+#![feature(alloc_layout_extra)]
+#![feature(allocator_api)]
 #![allow(dead_code)]
 
 mod node;

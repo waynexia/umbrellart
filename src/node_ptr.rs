@@ -1,6 +1,6 @@
 use std::ptr::NonNull;
 
-use crate::sync::{AtomicPtr, AtomicUsize, Mutex, MutexGuard, Ordering};
+use crate::sync::{Alloc, AtomicPtr, AtomicUsize, Mutex, MutexGuard, Ordering};
 
 crate struct NodePtr {
     ptr: AtomicPtr<NodeRc>,
@@ -99,7 +99,7 @@ impl NodeRc {
             ptr,
             count: AtomicUsize::new(1),
         };
-        Box::into_raw(Box::new(rc))
+        Box::into_raw(Box::new_in(rc, Alloc))
     }
 
     fn increase(&self) {
@@ -119,7 +119,7 @@ impl NodeRc {
     unsafe fn destroy(ptr: *mut Self) {
         if (*ptr).decrease() {
             println!("destroying {:?}", (*ptr).ptr);
-            Box::from_raw(ptr);
+            Box::from_raw_in(ptr, Alloc);
         }
     }
 }
@@ -174,6 +174,14 @@ mod test {
             // })
             // .join()
             // .unwrap();
+        })
+    }
+
+    #[test]
+    fn loom_alloc() {
+        loom::model(|| {
+            let rc = NodeRc::new_boxed(NonNull::new(0x1usize as *mut ()).unwrap());
+            unsafe { NodeRc::destroy(rc) };
         })
     }
 }
