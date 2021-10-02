@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 log = "0.4"
+loom = { version = "0.5.1", features = ["checkpoint"] }
 
 [dev-dependencies]
 env_logger = "0.7"
