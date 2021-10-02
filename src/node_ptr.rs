@@ -22,7 +22,6 @@ impl NodePtr {
     /// The ref holds one reference counting, thus it is legal as long as it exist.
     crate fn read(&self) -> NodeRef {
         let ptr = self.ptr.load(Ordering::SeqCst);
-        println!("read ptr: {:?}", ptr);
         unsafe {
             (*ptr).increase();
             NodeRef {
@@ -137,6 +136,13 @@ mod test {
             let node_ptr = NodePtr::new(0x1usize as *mut ());
             let node = Arc::new(node_ptr);
 
+            let read_ref_before = node.read();
+            let reader_before = thread::spawn(move || {
+                let ptr = read_ref_before.get();
+                let addr = ptr.as_ptr() as usize;
+                assert_eq!(addr, 0x1usize);
+            });
+
             let node_write = node.clone();
             let writer = thread::spawn(move || {
                 let write_ref = node_write.write();
@@ -145,19 +151,29 @@ mod test {
                 let ptr = write_ref.get();
                 let addr = ptr.as_ptr() as usize;
                 assert_eq!(addr, 0x2usize);
-                println!("writer finished");
             });
 
-            let read_ref = node.read();
-            let reader = thread::spawn(move || {
-                println!("reader start");
-                let ptr = read_ref.get();
+            let read_ref_after = node.read();
+            let reader_after = thread::spawn(move || {
+                let ptr = read_ref_after.get();
                 let addr = ptr.as_ptr() as usize;
-                assert_eq!(addr, 0x1usize);
+                // read starts after writer is indeterminate.
+                assert!((addr == 0x1usize) || (addr == 0x2usize));
             });
 
+            reader_before.join().unwrap();
             writer.join().unwrap();
-            reader.join().unwrap();
+            reader_after.join().unwrap();
+
+            // read after finished write is deterministic.
+            // let read_ref_after_all = node.read();
+            // thread::spawn(move || {
+            //     let ptr = read_ref_after_all.get();
+            //     let addr = ptr.as_ptr() as usize;
+            //     assert_eq!(addr, 0x2usize);
+            // })
+            // .join()
+            // .unwrap();
         })
     }
 }
