@@ -1,3 +1,7 @@
 /target
 
 launch.json
+
+.vscode/
+
+Cargo.lock
