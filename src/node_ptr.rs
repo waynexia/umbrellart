@@ -4,14 +4,14 @@ use loom::sync::atomic::AtomicIsize;
 
 use crate::sync::{Alloc, AtomicPtr, Mutex, MutexGuard, Ordering};
 
-crate struct NodePtr {
+pub(crate) struct NodePtr {
     ptr: AtomicPtr<NodeRc>,
     mutex: Mutex<()>,
     phantom_rc: AtomicIsize,
 }
 
 impl NodePtr {
-    crate fn new<T>(ptr: *mut T) -> Self {
+    pub(crate) fn new<T>(ptr: *mut T) -> Self {
         let ptr = NodeRc::new_boxed(NonNull::new(ptr as _).unwrap());
 
         Self {
@@ -24,7 +24,7 @@ impl NodePtr {
     /// Get a shared reference.
     ///
     /// The ref holds one reference counting, thus it is legal as long as it exist.
-    crate fn read(&self) -> NodeRef {
+    pub(crate) fn read(&self) -> NodeRef {
         let phantom_rc = self.phantom_rc.fetch_add(1, Ordering::SeqCst) + 1;
         let ptr = self.ptr.load(Ordering::SeqCst);
         unsafe {
@@ -44,7 +44,7 @@ impl NodePtr {
     ///
     /// This ref won't increase underlying reference counter. Its lifetime is bounded to
     /// the [NodePtr].
-    crate fn write(&self) -> NodeRefMut {
+    pub(crate) fn write(&self) -> NodeRefMut {
         let guard = self.mutex.lock().unwrap();
         NodeRefMut { ptr: self, guard }
     }
@@ -59,12 +59,12 @@ impl Drop for NodePtr {
     }
 }
 
-crate struct NodeRef {
+pub(crate) struct NodeRef {
     ptr: NonNull<NodeRc>,
 }
 
 impl NodeRef {
-    crate fn get(&self) -> NonNull<()> {
+    pub(crate) fn get(&self) -> NonNull<()> {
         unsafe { self.ptr.as_ref().ptr }
     }
 }
@@ -78,18 +78,18 @@ impl Drop for NodeRef {
     }
 }
 
-crate struct NodeRefMut<'a> {
+pub(crate) struct NodeRefMut<'a> {
     ptr: &'a NodePtr,
     guard: MutexGuard<'a, ()>,
 }
 
 impl<'a> NodeRefMut<'a> {
-    crate fn get(&self) -> NonNull<()> {
+    pub(crate) fn get(&self) -> NonNull<()> {
         unsafe { (*self.ptr.ptr.load(Ordering::SeqCst)).ptr }
     }
 
     /// Replace source [NodePtr]'s pointer.
-    crate fn replace<T>(&self, ptr: *mut T) {
+    pub(crate) fn replace<T>(&self, ptr: *mut T) {
         let new_item = NodeRc::new_boxed(NonNull::new(ptr as _).unwrap());
         let replaced = self.ptr.ptr.swap(new_item, Ordering::SeqCst);
         // let phantom_rc = self.ptr.phantom_rc.swap(0, Ordering::SeqCst) - 1;
@@ -104,7 +104,7 @@ impl<'a> NodeRefMut<'a> {
     }
 }
 
-crate struct NodeRc {
+pub(crate) struct NodeRc {
     ptr: NonNull<()>,
     count: AtomicIsize,
 }

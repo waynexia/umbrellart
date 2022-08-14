@@ -1,32 +1,32 @@
 #[cfg(loom)]
-crate use loom::sync::atomic::AtomicPtr;
+pub(crate) use loom::sync::atomic::AtomicPtr;
 #[cfg(not(loom))]
-crate use std::sync::atomic::AtomicPtr;
+pub(crate) use std::sync::atomic::AtomicPtr;
 
 #[cfg(loom)]
-crate use loom::sync::atomic::AtomicUsize;
+pub(crate) use loom::sync::atomic::AtomicUsize;
 #[cfg(not(loom))]
-crate use std::sync::atomic::AtomicUsize;
+pub(crate) use std::sync::atomic::AtomicUsize;
 
 #[cfg(loom)]
-crate use loom::sync::Mutex;
+pub(crate) use loom::sync::Mutex;
 #[cfg(not(loom))]
-crate use std::sync::Mutex;
+pub(crate) use std::sync::Mutex;
 
 #[cfg(loom)]
-crate use loom::sync::MutexGuard;
+pub(crate) use loom::sync::MutexGuard;
 #[cfg(not(loom))]
-crate use std::sync::MutexGuard;
+pub(crate) use std::sync::MutexGuard;
 
 #[cfg(loom)]
-crate use loom::sync::atomic::Ordering;
+pub(crate) use loom::sync::atomic::Ordering;
 #[cfg(not(loom))]
-crate use std::sync::atomic::Ordering;
+pub(crate) use std::sync::atomic::Ordering;
 
 #[cfg(loom)]
-crate use loom::sync::Arc;
+pub(crate) use loom::sync::Arc;
 #[cfg(not(loom))]
-crate use std::sync::Arc;
+pub(crate) use std::sync::Arc;
 
 #[cfg(loom)]
 use loom::alloc::Layout;
@@ -35,7 +35,7 @@ use std::alloc::AllocError;
 #[cfg(loom)]
 use std::ptr::NonNull;
 #[cfg(loom)]
-crate struct Alloc;
+pub(crate) struct Alloc;
 #[cfg(loom)]
 impl Alloc {
     fn alloc_impl(&self, layout: Layout, zeroed: bool) -> Result<NonNull<[u8]>, AllocError> {
@@ -74,4 +74,4 @@ unsafe impl std::alloc::Allocator for Alloc {
     }
 }
 #[cfg(not(loom))]
-crate use std::alloc::System as Alloc;
+pub(crate) use std::alloc::System as Alloc;
