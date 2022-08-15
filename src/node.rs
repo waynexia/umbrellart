@@ -6,13 +6,30 @@ use crate::node_impl::Node4;
 type PrefixCount = u32;
 
 #[repr(u8)]
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum NodeType {
     Node4,
     Node16,
     Node48,
     Node256,
     Leaf,
+}
+
+struct AssertLessThan4<const N: u8>;
+
+impl NodeType {
+    pub(crate) const fn from_u8<const N: u8>() -> Self {
+        match N {
+            0 => Self::Node4,
+            1 => Self::Node16,
+            2 => Self::Node48,
+            3 => Self::Node256,
+            4 => Self::Leaf,
+            // Sadly this cannot be checked in the compile time without incomplete feature
+            // `generic_const_exprs`. And even with it the code are wired.
+            _ => panic!("Unexpected Node Type"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +82,10 @@ impl Header {
     /// Decrease item count.
     pub fn dec_count(&mut self) {
         self.size -= 1;
+    }
+
+    pub fn node_type(&self) -> NodeType {
+        self.node_type
     }
 
     pub fn change_type(&mut self, new_type: NodeType) {
