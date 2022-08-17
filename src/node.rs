@@ -92,6 +92,11 @@ impl Header {
         self.node_type = new_type;
     }
 
+    /// Reset item counter. Note this is only for growing a node.
+    pub fn reset_count(&mut self) {
+        self.size = 0;
+    }
+
     /// Compare prefix stored in this header. Only
     /// _min([prefix_len],[MAX_PREFIX_STORED])_ bytes will be compared. If
     /// all stored prefix bytes are matched and _[prefix_len] >

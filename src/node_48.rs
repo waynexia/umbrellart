@@ -12,9 +12,9 @@ pub(crate) struct Node48 {
 
 impl Node48 {
     /// Alias for [u8::MAX], used as key slot's capacity.
-    const MAX: usize = u8::MAX as usize;
+    const MAX: usize = u8::MAX as usize + 1;
     /// How many item it can hold.
-    const CAPACITY: usize = 48;
+    pub const CAPACITY: usize = 48;
     /// Sentinel value for an vacant key.
     const NULL_INDEX: u8 = u8::MAX;
 
@@ -114,10 +114,52 @@ impl Node48 {
     }
 
     pub fn grow(self) -> Node256 {
-        todo!()
+        let Self {
+            mut header,
+            children,
+            keys,
+        } = self;
+        let item_count = header.size();
+
+        // change header and construct Node256
+        header.change_type(NodeType::Node256);
+        header.reset_count();
+        let mut node256 = Node256::from_header(header);
+
+        for (key, child) in keys.into_iter().zip(children.into_iter()) {
+            if key != Self::NULL_INDEX {
+                node256.add_child(key, child);
+            }
+        }
+
+        // Node48 will put all valid items in the front. So we can copy that segment
+        // into new node.
+        node256.children.copy_from_slice(&children[0..item_count]);
+        node256.keys.copy_from_slice(&keys);
+
+        node256
     }
 
     pub fn shrink(self) -> Node16 {
-        todo!()
+        assert!(self.should_shrink());
+        let Self {
+            mut header,
+            children,
+            keys,
+        } = self;
+        let item_count = header.size();
+
+        // change header and construct Node256
+        header.change_type(NodeType::Node256);
+        header.reset_count();
+        let mut node16 = Node16::from_header(header);
+
+        for (key, index) in keys.into_iter().enumerate() {
+            if index != Self::NULL_INDEX {
+                node16.add_child(key as u8, children[index as usize]);
+            }
+        }
+
+        node16
     }
 }

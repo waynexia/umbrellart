@@ -21,7 +21,7 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
 
     /// Construct a [DynamicNode] with existing [Header]. This is used to
     /// accomplish node expand/shrink.
-    fn from_header(header: Header) -> Self {
+    pub(crate) fn from_header(header: Header) -> Self {
         debug_assert!(header.node_type() == Self::TYPE);
         Self {
             header,
@@ -142,7 +142,9 @@ impl Node4 {
             keys,
         } = self;
 
-        // change the type and construct a Node16
+        // Change the type and construct a Node16.
+        // Differ to `Node16`, this copies key and child slots directly
+        // into new node thus no need to reset header's counter.
         header.change_type(NodeType::Node16);
         let mut node16 = Node16::from_header(header);
 
@@ -190,6 +192,7 @@ impl Node16 {
 
         // change header and construct a Node48
         header.change_type(NodeType::Node48);
+        header.reset_count();
         let mut node48 = Node48::from_header(header);
 
         for (key, child) in keys.into_iter().zip(children.into_iter()) {
@@ -212,6 +215,7 @@ impl Node16 {
 
         // change header and construct a Node48
         header.change_type(NodeType::Node4);
+        header.reset_count();
         let mut node4 = Node4::from_header(header);
 
         for (key, child) in keys.into_iter().zip(children.into_iter()) {
