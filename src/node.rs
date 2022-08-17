@@ -113,6 +113,7 @@ impl Header {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub(crate) struct NodePtr(*const ());
 
 impl NodePtr {

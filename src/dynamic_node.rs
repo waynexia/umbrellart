@@ -51,24 +51,49 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
         None
     }
 
-    // todo: handle duplicate key, return a option
     /// # Notice
     ///
-    /// Caller should ensure the capacity.
-    pub fn add_child(&mut self, key: u8, child: NodePtr) {
+    /// Caller should ensure the capacity. For simplicity this needs at least
+    /// one empty slot (don't consider the situation that a duplicate insertion
+    /// won't occupy new slot).
+    pub fn add_child(&mut self, key: u8, child: NodePtr) -> Option<NodePtr> {
         assert!(self.header.size() < CAPACITY);
-        self.header.inc_count();
 
-        // find a empty slot
-        let (index, _) = self
-            .children
-            .iter()
-            .enumerate()
-            .find(|(_, ptr)| ptr.is_null())
-            .unwrap();
+        // go though all keys and children to find duplicate key and/or empty slot. If
+        // duplicate key already exist this will get it's index and child. Otherwise it
+        // will get the first empty slot.
+        let (index, exist) = self.keys.iter().zip(self.children.iter()).enumerate().fold(
+            (None, None),
+            |(mut maybe_index, mut maybe_exist), (index, (k, child))| {
+                // is an empty slot.
+                if child.is_null() {
+                    maybe_index.get_or_insert(index);
+                    return (maybe_index, maybe_exist);
+                }
 
+                // is duplicate key
+                if *k == key {
+                    maybe_exist = Some(*child);
+                    maybe_index = Some(index);
+                }
+
+                (maybe_index, maybe_exist)
+            },
+        );
+
+        // handle duplicate key
+        if exist.is_some() {
+            // todo: what if it's not a Leaf node
+            self.children[index.unwrap() as usize] = child;
+            return exist;
+        }
+
+        // insert into slot
+        let index = index.unwrap();
         self.keys[index] = key;
         self.children[index] = child;
+        self.header.inc_count();
+        None
     }
 
     pub fn remove_child(&mut self, key: u8) -> Option<NodePtr> {
@@ -203,20 +228,18 @@ impl Node16 {
 mod test {
     use super::*;
 
-    fn dynamic_node_insert_find_remove<const CAP: usize, const TYPE: u8>(
-        _node: DynamicNode<CAP, TYPE>,
-    ) {
+    fn do_insert_find_remove<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
         let mut node = DynamicNode::<CAP, TYPE>::new();
 
         node.add_child(9, NodePtr::from_usize(2));
-        assert!(node.find_key(9).is_some());
+        assert_eq!(node.find_key(9).unwrap(), NodePtr::from_usize(2));
         assert!(node.find_key(10).is_none());
         assert!(node.remove_child(9).is_some());
         assert!(node.remove_child(9).is_none());
         assert!(node.find_key(9).is_none());
     }
 
-    fn dynamic_node_overflow<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
+    fn do_overflow<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
         let mut node = DynamicNode::<CAP, TYPE>::new();
 
         for i in 0..CAP {
@@ -226,7 +249,7 @@ mod test {
         node.add_child(10, NodePtr::from_usize(2));
     }
 
-    fn dynamic_node_erases<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
+    fn do_erases<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
         let mut node = DynamicNode::<CAP, TYPE>::new();
 
         for i in 0..u8::MAX {
@@ -235,35 +258,91 @@ mod test {
         }
     }
 
+    fn do_insert_duplicate<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
+        let mut node = DynamicNode::<CAP, TYPE>::new();
+
+        assert!(node.add_child(1, NodePtr::from_usize(10)).is_none());
+        assert_eq!(
+            node.add_child(1, NodePtr::from_usize(100)).unwrap(),
+            NodePtr::from_usize(10)
+        );
+
+        assert!(node.add_child(2, NodePtr::from_usize(20)).is_none());
+        assert!(node.add_child(3, NodePtr::from_usize(30)).is_none());
+        assert_eq!(node.remove_child(2).unwrap(), NodePtr::from_usize(20));
+        assert_eq!(
+            node.add_child(3, NodePtr::from_usize(300)).unwrap(),
+            NodePtr::from_usize(30)
+        );
+        assert!(node.add_child(2, NodePtr::from_usize(200)).is_none());
+        assert_eq!(
+            node.add_child(2, NodePtr::from_usize(2000)).unwrap(),
+            NodePtr::from_usize(200)
+        );
+        assert_eq!(node.find_key(2).unwrap(), NodePtr::from_usize(2000));
+    }
+
     #[test]
     fn node4_insert_find_remove() {
-        dynamic_node_insert_find_remove(Node4::new());
+        do_insert_find_remove(Node4::new());
     }
 
     #[test]
     #[should_panic]
     fn node4_overflow() {
-        dynamic_node_overflow(Node4::new());
+        do_overflow(Node4::new());
     }
 
     #[test]
     fn node4_erases() {
-        dynamic_node_erases(Node4::new());
+        do_erases(Node4::new());
+    }
+
+    #[test]
+    fn node4_insert_duplicate() {
+        do_insert_duplicate(Node4::new());
     }
 
     #[test]
     fn node16_insert_find_remove() {
-        dynamic_node_insert_find_remove(Node16::new());
+        do_insert_find_remove(Node16::new());
     }
 
     #[test]
     #[should_panic]
     fn node16_overflow() {
-        dynamic_node_overflow(Node16::new());
+        do_overflow(Node16::new());
     }
 
     #[test]
     fn node16_erases() {
-        dynamic_node_erases(Node16::new());
+        do_erases(Node16::new());
+    }
+
+    #[test]
+    fn node16_insert_duplicate() {
+        do_insert_duplicate(Node16::new());
+    }
+
+    #[test]
+    fn node4_insert_to_full() {
+        let mut node = Node4::new();
+
+        for i in 0..Node4::CAPACITY {
+            node.add_child(i as u8, NodePtr::from_usize(i * 10));
+        }
+
+        assert!(node.should_grow());
+    }
+
+    #[test]
+    fn node16_insert_to_full() {
+        let mut node = Node16::new();
+
+        for i in 0..Node16::CAPACITY {
+            node.add_child(i as u8, NodePtr::from_usize(i * 10));
+        }
+
+        assert!(node.should_grow());
     }
 }

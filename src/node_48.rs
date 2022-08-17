@@ -58,9 +58,11 @@ impl Node48 {
 
     /// # Notice
     ///
-    /// Caller should ensure the capacity.
+    /// Caller should ensure the capacity. For simplicity this needs at least
+    /// one empty slot (don't consider the situation that a duplicate insertion
+    /// won't occupy new slot).
     pub fn add_child(&mut self, key: u8, child: NodePtr) -> Option<NodePtr> {
-        assert!(self.header.size() <= Self::CAPACITY);
+        assert!(self.header.size() < Self::CAPACITY);
         let index = self.keys[key as usize];
 
         // already exist, replace previous key.
