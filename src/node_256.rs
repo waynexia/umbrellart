@@ -1,3 +1,5 @@
+use std::mem;
+
 use crate::node::{Header, NodePtr, NodeType};
 use crate::node_48::Node48;
 
@@ -6,7 +8,6 @@ use crate::node_48::Node48;
 pub(crate) struct Node256 {
     header: Header,
     pub(crate) children: [NodePtr; Self::CAPACITY],
-    pub(crate) keys: [u8; Self::CAPACITY],
 }
 
 impl Node256 {
@@ -17,8 +18,7 @@ impl Node256 {
     const fn assert_node4_size() {
         // 16 for header
         // 2048 (8 * 256) for children
-        // 256 for keys
-        const _: () = assert!(std::mem::size_of::<Node256>() == 2320);
+        const _: () = assert!(std::mem::size_of::<Node256>() == 2064);
     }
 
     /// Construct a [Node256] with existing [Header]. This is used to
@@ -27,7 +27,6 @@ impl Node256 {
         debug_assert!(header.node_type() == NodeType::Node256);
         Self {
             header,
-            keys: [0; Self::CAPACITY],
             children: [NodePtr::default(); Self::CAPACITY],
         }
     }
@@ -36,27 +35,20 @@ impl Node256 {
         let header = Header::new(NodeType::Node48);
         Self {
             header,
-            keys: [0; Self::CAPACITY],
             children: [NodePtr::default(); Self::CAPACITY],
         }
     }
 
     pub fn find_key(&self, key: u8) -> Option<NodePtr> {
-        let index = self.keys[key as usize];
-
-        if !self.children[index as usize].is_null() {
-            Some(self.children[index as usize])
-        } else {
-            None
-        }
+        self.children[key as usize].into_option()
     }
 
     pub fn add_child(&mut self, key: u8, child: NodePtr) -> Option<NodePtr> {
-        todo!()
+        mem::replace(&mut self.children[key as usize], child).into_option()
     }
 
     pub fn remove_child(&mut self, key: u8) -> Option<NodePtr> {
-        todo!()
+        mem::take(&mut self.children[key as usize]).into_option()
     }
 
     pub fn should_grow(&self) -> bool {
@@ -72,7 +64,25 @@ impl Node256 {
     }
 
     pub fn shrink(self) -> Node48 {
-        todo!()
+        assert!(self.header.size() < Node48::CAPACITY);
+
+        let Self {
+            mut header,
+            children,
+        } = self;
+
+        // change header and construct Node256
+        header.change_type(NodeType::Node256);
+        header.reset_count();
+        let mut node48 = Node48::from_header(header);
+
+        for (key, child) in children.into_iter().enumerate() {
+            if !child.is_null() {
+                node48.add_child(key as u8, child);
+            }
+        }
+
+        node48
     }
 }
 

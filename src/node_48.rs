@@ -132,22 +132,17 @@ impl Node48 {
             }
         }
 
-        // Node48 will put all valid items in the front. So we can copy that segment
-        // into new node.
-        node256.children.copy_from_slice(&children[0..item_count]);
-        node256.keys.copy_from_slice(&keys);
-
         node256
     }
 
     pub fn shrink(self) -> Node16 {
-        assert!(self.should_shrink());
+        assert!(self.header.size() < Node16::CAPACITY);
+
         let Self {
             mut header,
             children,
             keys,
         } = self;
-        let item_count = header.size();
 
         // change header and construct Node256
         header.change_type(NodeType::Node256);

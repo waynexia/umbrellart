@@ -205,7 +205,7 @@ impl Node16 {
     }
 
     pub fn shrink(self) -> Node4 {
-        assert!(self.should_shrink());
+        assert!(self.header.size() < Node4::CAPACITY);
 
         let Self {
             mut header,

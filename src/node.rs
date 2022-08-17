@@ -150,6 +150,14 @@ impl NodePtr {
             unsafe { Some(&*(self.0 as *const Header)) }
         }
     }
+
+    pub fn into_option(self) -> Option<Self> {
+        if self.is_null() {
+            None
+        } else {
+            Some(self)
+        }
+    }
 }
 
 impl Default for NodePtr {
