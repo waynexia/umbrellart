@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::ptr;
 
-use crate::node_impl::Node4;
+use crate::dynamic_node::Node4;
 
 type PrefixCount = u32;
 
