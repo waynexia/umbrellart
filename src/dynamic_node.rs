@@ -9,9 +9,9 @@ use crate::node_48::Node48;
 #[repr(C)]
 #[derive(Debug)]
 pub(crate) struct DynamicNode<const CAPACITY: usize, const TYPE: u8> {
-    header: Header,
-    children: [NodePtr; CAPACITY],
-    keys: [u8; CAPACITY],
+    pub(crate) header: Header,
+    pub(crate) children: [NodePtr; CAPACITY],
+    pub(crate) keys: [u8; CAPACITY],
 }
 
 impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
@@ -150,8 +150,8 @@ impl Node4 {
 
         // Node4 and Node16 have the same logic on children and keys array. So just copy
         // them.
-        node16.children.copy_from_slice(&children);
-        node16.keys.copy_from_slice(&keys);
+        node16.children[0..children.len()].copy_from_slice(&children);
+        node16.keys[0..children.len()].copy_from_slice(&keys);
 
         node16
     }
@@ -348,5 +348,78 @@ mod test {
         }
 
         assert!(node.should_grow());
+    }
+
+    #[test]
+    fn node4_grow_to_node16() {
+        let mut node4 = Node4::new();
+        for i in 0..Node4::CAPACITY - 1 {
+            node4.add_child(i as u8, NodePtr::from_usize(i * 10 + 100));
+        }
+
+        let node16 = node4.grow();
+
+        assert_eq!(node16.header.size(), Node4::CAPACITY - 1);
+        assert_eq!(node16.header.node_type(), NodeType::Node16);
+
+        assert_eq!(node16.find_key(0).unwrap(), NodePtr::from_usize(100));
+        assert_eq!(node16.find_key(1).unwrap(), NodePtr::from_usize(110));
+        assert_eq!(node16.find_key(2).unwrap(), NodePtr::from_usize(120));
+        for i in Node4::CAPACITY..=u8::MAX as usize {
+            assert!(node16.find_key(i as u8).is_none());
+        }
+    }
+
+    #[test]
+    fn node16_grow_to_node48() {
+        let mut node16 = Node16::new();
+        for i in 0..Node16::CAPACITY - 1 {
+            node16.add_child(i as u8, NodePtr::from_usize(i * 10 + 100));
+        }
+
+        let node48 = node16.grow();
+
+        assert_eq!(node48.header.size(), Node16::CAPACITY - 1);
+        assert_eq!(node48.header.node_type(), NodeType::Node48);
+
+        for i in 0..Node16::CAPACITY - 1 {
+            assert_eq!(
+                node48.find_key(i as u8).unwrap(),
+                NodePtr::from_usize(i * 10 + 100)
+            );
+        }
+        for i in Node16::CAPACITY..=u8::MAX as usize {
+            assert!(node48.find_key(i as u8).is_none());
+        }
+    }
+
+    #[test]
+    fn node16_shrink_to_node4() {
+        let mut node16 = Node16::new();
+        for i in 0..Node16::CAPACITY - 1 {
+            node16.add_child(i as u8, NodePtr::from_usize(i * 10 + 100));
+        }
+        let mut i = 0;
+        while !node16.should_shrink() {
+            node16.remove_child(i).unwrap();
+            i += 1;
+        }
+
+        let node4 = node16.shrink();
+
+        assert_eq!(node4.header.size(), 2);
+        assert_eq!(node4.header.node_type(), NodeType::Node4);
+
+        for i in 0..=u8::MAX as usize {
+            if i == 13 || i == 14 {
+                // the last two elements
+                assert_eq!(
+                    node4.find_key(i as u8).unwrap(),
+                    NodePtr::from_usize(i * 10 + 100)
+                );
+            } else {
+                assert!(node4.find_key(i as u8).is_none());
+            }
+        }
     }
 }

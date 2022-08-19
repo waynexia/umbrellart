@@ -6,7 +6,7 @@ use crate::node_48::Node48;
 #[repr(C)]
 #[derive(Debug)]
 pub(crate) struct Node256 {
-    header: Header,
+    pub(crate) header: Header,
     pub(crate) children: [NodePtr; Self::CAPACITY],
 }
 
@@ -44,11 +44,19 @@ impl Node256 {
     }
 
     pub fn add_child(&mut self, key: u8, child: NodePtr) -> Option<NodePtr> {
-        mem::replace(&mut self.children[key as usize], child).into_option()
+        let res = mem::replace(&mut self.children[key as usize], child).into_option();
+        if res.is_none() {
+            self.header.inc_count();
+        }
+        res
     }
 
     pub fn remove_child(&mut self, key: u8) -> Option<NodePtr> {
-        mem::take(&mut self.children[key as usize]).into_option()
+        let res = mem::take(&mut self.children[key as usize]).into_option();
+        if res.is_some() {
+            self.header.dec_count();
+        }
+        res
     }
 
     pub fn should_grow(&self) -> bool {
