@@ -79,8 +79,8 @@ impl Node256 {
             children,
         } = self;
 
-        // change header and construct Node256
-        header.change_type(NodeType::Node256);
+        // change header and construct Node48
+        header.change_type(NodeType::Node48);
         header.reset_count();
         let mut node48 = Node48::from_header(header);
 
@@ -97,4 +97,70 @@ impl Node256 {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn insert_find_remove() {
+        let mut node = Node256::new();
+
+        node.add_child(u8::MAX, NodePtr::from_usize(2));
+        assert_eq!(node.find_key(u8::MAX).unwrap(), NodePtr::from_usize(2));
+        assert!(node.find_key(0).is_none());
+        assert!(node.find_key(2).is_none());
+        assert!(node.find_key(u8::MAX - 1).is_none());
+        assert!(node.remove_child(0).is_none());
+        assert!(node.remove_child(2).is_none());
+        assert!(node.remove_child(u8::MAX - 1).is_none());
+        assert_eq!(node.remove_child(u8::MAX).unwrap(), NodePtr::from_usize(2));
+        assert!(node.find_key(u8::MAX).is_none());
+    }
+
+    #[test]
+    fn insert_duplicate() {
+        let mut node = Node256::new();
+
+        assert!(node.add_child(1, NodePtr::from_usize(10)).is_none());
+        assert_eq!(
+            node.add_child(1, NodePtr::from_usize(100)).unwrap(),
+            NodePtr::from_usize(10)
+        );
+
+        assert!(node.add_child(2, NodePtr::from_usize(20)).is_none());
+        assert!(node.add_child(3, NodePtr::from_usize(30)).is_none());
+        assert_eq!(node.remove_child(2).unwrap(), NodePtr::from_usize(20));
+        assert_eq!(
+            node.add_child(3, NodePtr::from_usize(300)).unwrap(),
+            NodePtr::from_usize(30)
+        );
+        assert!(node.add_child(2, NodePtr::from_usize(200)).is_none());
+        assert_eq!(
+            node.add_child(2, NodePtr::from_usize(2000)).unwrap(),
+            NodePtr::from_usize(200)
+        );
+        assert_eq!(node.find_key(2).unwrap(), NodePtr::from_usize(2000));
+    }
+
+    #[test]
+    fn shrink_to_node48() {
+        let mut node256 = Node256::new();
+        for i in 0..Node48::CAPACITY - 1 {
+            assert!(node256
+                .add_child(i as u8, NodePtr::from_usize(i * 10 + 200))
+                .is_none());
+        }
+
+        let node48 = node256.shrink();
+
+        assert_eq!(node48.header.size(), Node48::CAPACITY - 1);
+        assert_eq!(node48.header.node_type(), NodeType::Node48);
+
+        for i in 0..Node48::CAPACITY - 1 {
+            assert_eq!(
+                node48.find_key(i as u8).unwrap(),
+                NodePtr::from_usize(i * 10 + 200)
+            );
+        }
+        for i in Node48::CAPACITY..=u8::MAX as usize {
+            assert!(node48.find_key(i as u8).is_none());
+        }
+    }
 }

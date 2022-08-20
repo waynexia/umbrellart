@@ -198,7 +198,6 @@ mod test {
     }
 
     #[test]
-    #[ignore = "todo: debug SIGSEGV"]
     fn insert_duplicate() {
         let mut node = Node48::new();
 
