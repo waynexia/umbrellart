@@ -1,7 +1,10 @@
+use std::intrinsics::transmute;
 use std::marker::PhantomData;
 use std::ptr;
 
-use crate::dynamic_node::Node4;
+use crate::dynamic_node::{Node16, Node4};
+use crate::node_256::Node256;
+use crate::node_48::Node48;
 
 type PrefixCount = u32;
 
@@ -185,8 +188,8 @@ impl<V> Node<V> {
                 return None;
             }
             depth += header.prefix_len();
-            curr_node =
-                unsafe { &*(header as *const Header as *const Node4) }.find_key(key[depth])?;
+            curr_node = Self::find_key(curr_node, key[depth])?;
+
             if depth == key_len {
                 todo!("check result and return")
             }
@@ -194,6 +197,52 @@ impl<V> Node<V> {
 
         None
     }
+}
+
+macro_rules! dispatch_node_fn {
+    ($fn_name:ident, ($($v:tt: $t:ty),*), $out:ty) => {
+        fn $fn_name(node_ref:NodePtr, $($v:$t),*) -> $out{
+            let header = node_ref.try_as_header().unwrap();
+            match header.node_type() {
+                NodeType::Node4 => {
+                    let node: &mut Node4 =
+                        unsafe { &mut *(std::mem::transmute::<*const (), *mut Node4>(node_ref.0)) };
+                    node.$fn_name($($v),*)
+                }
+                NodeType::Node16 => {
+                    let node: &mut Node16 =
+                        unsafe { &mut *(std::mem::transmute::<*const (), *mut Node16>(node_ref.0)) };
+                    node.$fn_name($($v),*)
+                }
+                NodeType::Node48 => {
+                    let node: &mut Node48 =
+                        unsafe { &mut *(std::mem::transmute::<*const (), *mut Node48>(node_ref.0)) };
+                    node.$fn_name($($v),*)
+                }
+                NodeType::Node256 => {
+                    let node: &mut Node256 =
+                        unsafe { &mut *(std::mem::transmute::<*const (), *mut Node256>(node_ref.0)) };
+                    node.$fn_name($($v),*)
+                }
+                NodeType::Leaf => {
+                    unreachable!("This function is only for inner nodes")
+                }
+            }
+        }
+    };
+}
+
+/// Inner methods implementations for variant nodes.
+impl<V> Node<V> {
+    dispatch_node_fn!(find_key, (key: u8), Option<NodePtr>);
+
+    dispatch_node_fn!(add_child, (key: u8, child: NodePtr), Option<NodePtr>);
+
+    dispatch_node_fn!(remove_child, (key: u8), Option<NodePtr>);
+
+    dispatch_node_fn!(should_grow, (), bool);
+
+    dispatch_node_fn!(should_shrink, (), bool);
 }
 
 #[cfg(test)]
