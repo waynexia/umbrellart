@@ -1,4 +1,3 @@
-use std::intrinsics::transmute;
 use std::marker::PhantomData;
 use std::ptr;
 
@@ -157,9 +156,10 @@ impl Header {
 
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
-pub(crate) struct NodePtr(pub(crate) *const ());
+pub(crate) struct NodePtr(pub(crate) *mut ());
 
 impl NodePtr {
+    #[inline]
     pub fn from_ptr<T>(ptr: *const T) -> Self {
         Self(ptr as _)
     }
@@ -168,21 +168,24 @@ impl NodePtr {
     #[inline]
     pub fn boxed<T>(item: T) -> Self {
         let ptr = Box::leak(Box::new(item));
-        Self(ptr as *const T as _)
+        Self(ptr as *mut T as *mut ())
     }
 
+    #[inline]
     pub fn cast_to<T>(&self) -> Option<&T> {
-        if self.is_null() || self.0 as usize % 2 != 0 {
+        if !self.is_valid_rust_pointer() {
             return None;
         }
 
         unsafe { Some(&*(self.0 as *const T)) }
     }
 
+    #[inline]
     pub fn from_usize(ptr: usize) -> Self {
         Self(ptr as _)
     }
 
+    #[inline]
     pub fn is_null(&self) -> bool {
         self.0.is_null()
     }
@@ -192,6 +195,7 @@ impl NodePtr {
     /// [NodePtr] should only comes from a valid Node. All nodes are
     /// `#[repr(C)]` and with [Header] on the first position so it is safe to
     /// cast to a [Header] reference if this pointer is not null.
+    #[inline]
     pub fn try_as_header(&self) -> Option<&Header> {
         if self.is_null() {
             None
@@ -200,6 +204,7 @@ impl NodePtr {
         }
     }
 
+    #[inline]
     pub fn try_as_header_mut(&mut self) -> Option<&mut Header> {
         if self.is_null() {
             None
@@ -208,6 +213,7 @@ impl NodePtr {
         }
     }
 
+    #[inline]
     pub fn into_option(self) -> Option<Self> {
         if self.is_null() {
             None
@@ -215,11 +221,37 @@ impl NodePtr {
             Some(self)
         }
     }
+
+    /// Drop the resource referenced by this pointer. Only when the resource is
+    /// one of the `Node`s will take efforts.
+    ///
+    /// Because [NodePtr] is [Copy]-able, implement [Drop] is not good.
+    pub fn drop(self) {
+        if !self.is_valid_rust_pointer() {
+            return;
+        }
+
+        unsafe {
+            match self.try_as_header().unwrap().node_type() {
+                NodeType::Node4 => _ = Node4::from_node_ptr(self),
+                NodeType::Node16 => _ = Node16::from_node_ptr(self),
+                NodeType::Node48 => _ = Node48::from_node_ptr(self),
+                NodeType::Node256 => _ = Node256::from_node_ptr(self),
+                NodeType::Leaf => _ = NodeLeaf::from_node_ptr(self),
+            }
+        }
+    }
+
+    /// Check whether this pointer is null or unaligned by 2
+    #[inline]
+    fn is_valid_rust_pointer(&self) -> bool {
+        !self.is_null() && self.0.is_aligned_to(2)
+    }
 }
 
 impl Default for NodePtr {
     fn default() -> Self {
-        Self(ptr::null())
+        Self(ptr::null_mut())
     }
 }
 
@@ -449,5 +481,7 @@ mod test {
             assert!(Node::<()>::insert(&mut root, &[i], leaf_ptr).is_none());
             println!("root pointer: {:?}", root);
         }
+
+        root.drop();
     }
 }

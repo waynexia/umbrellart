@@ -9,6 +9,8 @@ pub(crate) struct NodeLeaf {
 }
 
 impl NodeLeaf {
+    const TYPE: NodeType = NodeType::Leaf;
+
     pub fn new(key: Vec<u8>, value: NodePtr) -> Self {
         let (header, key) = if key.len() <= Header::MAX_PREFIX_STORED {
             // inline short key into header
@@ -18,6 +20,14 @@ impl NodeLeaf {
         };
 
         Self { header, key, value }
+    }
+
+    /// Panic if the pointer is invalid.
+    pub unsafe fn from_node_ptr(ptr: NodePtr) -> Self {
+        let node_type = ptr.try_as_header().unwrap().node_type();
+        assert_eq!(node_type, Self::TYPE);
+
+        Box::into_inner(Box::from_raw(ptr.0 as *const Self as *mut Self))
     }
 
     pub fn load_key(&self) -> Option<Vec<u8>> {

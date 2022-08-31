@@ -260,7 +260,7 @@ mod test {
         let mut node48 = Node48::new();
         for i in 0..Node48::CAPACITY - 1 {
             assert!(node48
-                .add_child(i as u8, NodePtr::from_usize(i * 10 + 40))
+                .add_child(i as u8, NodePtr::from_usize(i * 10 + 41))
                 .is_none());
         }
 
@@ -272,7 +272,7 @@ mod test {
         for i in 0..Node48::CAPACITY - 1 {
             assert_eq!(
                 node256.find_key(i as u8).unwrap(),
-                NodePtr::from_usize(i * 10 + 40)
+                NodePtr::from_usize(i * 10 + 41)
             );
         }
         for i in Node48::CAPACITY..=u8::MAX as usize {
