@@ -18,6 +18,8 @@ impl Node48 {
     /// Sentinel value for an vacant key.
     const NULL_INDEX: u8 = u8::MAX;
 
+    pub const TYPE: NodeType = NodeType::Node48;
+
     #[allow(dead_code)]
     const fn assert_node4_size() {
         // 16 for header
@@ -46,11 +48,29 @@ impl Node48 {
         }
     }
 
+    /// Panic if the pointer is invalid.
+    pub unsafe fn from_node_ptr(ptr: NodePtr) -> Self {
+        let node_type = ptr.try_as_header().unwrap().node_type();
+        assert_eq!(node_type, Self::TYPE);
+
+        Box::into_inner(Box::from_raw(ptr.0 as *const Self as *mut Self))
+    }
+
     pub fn find_key(&self, key: u8) -> Option<NodePtr> {
         let index = self.keys[key as usize];
 
         if index != Self::NULL_INDEX && !self.children[index as usize].is_null() {
             Some(self.children[index as usize])
+        } else {
+            None
+        }
+    }
+
+    pub fn find_key_mut(&mut self, key: u8) -> Option<&mut NodePtr> {
+        let index = self.keys[key as usize];
+
+        if index != Self::NULL_INDEX && !self.children[index as usize].is_null() {
+            Some(&mut self.children[index as usize])
         } else {
             None
         }

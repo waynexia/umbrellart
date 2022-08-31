@@ -39,11 +39,31 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
         }
     }
 
+    /// Panic if the pointer is invalid.
+    pub unsafe fn from_node_ptr(ptr: NodePtr) -> Self {
+        let node_type = ptr.try_as_header().unwrap().node_type();
+        assert_eq!(node_type, Self::TYPE);
+
+        Box::into_inner(Box::from_raw(ptr.0 as *const Self as *mut Self))
+    }
+
     pub fn find_key(&self, key: u8) -> Option<NodePtr> {
         for (index, ptr) in self.children.iter().enumerate() {
             if !ptr.is_null() {
                 if self.keys[index] == key {
                     return Some(self.children[index]);
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn find_key_mut(&mut self, key: u8) -> Option<&mut NodePtr> {
+        for (index, ptr) in self.children.iter().enumerate() {
+            if !ptr.is_null() {
+                if self.keys[index] == key {
+                    return Some(&mut self.children[index]);
                 }
             }
         }

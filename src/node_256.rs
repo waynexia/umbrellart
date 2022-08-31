@@ -14,6 +14,8 @@ impl Node256 {
     /// How many item it can hold.
     const CAPACITY: usize = u8::MAX as usize + 1;
 
+    pub const TYPE: NodeType = NodeType::Node256;
+
     #[allow(dead_code)]
     const fn assert_node4_size() {
         // 16 for header
@@ -39,8 +41,24 @@ impl Node256 {
         }
     }
 
+    /// Panic if the pointer is invalid.
+    pub unsafe fn from_node_ptr(ptr: NodePtr) -> Self {
+        let node_type = ptr.try_as_header().unwrap().node_type();
+        assert_eq!(node_type, Self::TYPE);
+
+        Box::into_inner(Box::from_raw(ptr.0 as *const Self as *mut Self))
+    }
+
     pub fn find_key(&self, key: u8) -> Option<NodePtr> {
         self.children[key as usize].into_option()
+    }
+
+    pub fn find_key_mut(&mut self, key: u8) -> Option<&mut NodePtr> {
+        if self.children[key as usize].is_null() {
+            None
+        } else {
+            Some(&mut self.children[key as usize])
+        }
     }
 
     pub fn add_child(&mut self, key: u8, child: NodePtr) -> Option<NodePtr> {
