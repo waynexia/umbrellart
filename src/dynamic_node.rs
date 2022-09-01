@@ -10,6 +10,7 @@ use crate::node_48::Node48;
 #[derive(Debug)]
 pub(crate) struct DynamicNode<const CAPACITY: usize, const TYPE: u8> {
     pub(crate) header: Header,
+    /// N slots in the beginning are valid items (N is header's item count)
     pub(crate) children: [NodePtr; CAPACITY],
     pub(crate) keys: [u8; CAPACITY],
 }
@@ -130,6 +131,38 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
         let taken = mem::take(&mut self.children[index]);
         Some(taken)
     }
+
+    /// Decouple this struct. Because [DynamicNode] implements [Drop], its
+    /// fields cannot be moved out directly.
+    fn decouple(self) -> (Header, [NodePtr; CAPACITY], [u8; CAPACITY]) {
+        #[repr(C)]
+        struct NotDropDynamicNode<const CAP: usize> {
+            header: Header,
+            children: [NodePtr; CAP],
+            keys: [u8; CAP],
+        }
+
+        // todo: compiler doesn't believe the two `CAPACITY` are the same so I can't
+        // direct `transmute`.
+        // issue: https://github.com/rust-lang/rust/issues/61956
+        let dynamic_node: NotDropDynamicNode<CAPACITY> = unsafe { mem::transmute_copy(&self) };
+        mem::forget(self);
+        let NotDropDynamicNode {
+            header,
+            children,
+            keys,
+        } = dynamic_node;
+
+        (header, children, keys)
+    }
+}
+
+impl<const CAPACITY: usize, const TYPE: u8> Drop for DynamicNode<CAPACITY, TYPE> {
+    fn drop(&mut self) {
+        for i in 0..self.header.size() {
+            self.children[i].drop();
+        }
+    }
 }
 
 pub(crate) type Node4 = DynamicNode<4, 0>;
@@ -156,11 +189,7 @@ impl Node4 {
     }
 
     pub fn grow(self) -> Node16 {
-        let Self {
-            mut header,
-            children,
-            keys,
-        } = self;
+        let (mut header, children, keys) = self.decouple();
 
         // Change the type and construct a Node16.
         // Differ to `Node16`, this copies key and child slots directly
@@ -204,11 +233,7 @@ impl Node16 {
     }
 
     pub fn grow(self) -> Node48 {
-        let Self {
-            mut header,
-            children,
-            keys,
-        } = self;
+        let (mut header, children, keys) = self.decouple();
 
         // change header and construct a Node48
         header.change_type(NodeType::Node48);
@@ -227,11 +252,7 @@ impl Node16 {
     pub fn shrink(self) -> Node4 {
         assert!(self.header.size() < Node4::CAPACITY);
 
-        let Self {
-            mut header,
-            children,
-            keys,
-        } = self;
+        let (mut header, children, keys) = self.decouple();
 
         // change header and construct a Node48
         header.change_type(NodeType::Node4);
@@ -251,12 +272,13 @@ impl Node16 {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::leaf::NodeLeaf;
 
     fn do_insert_find_remove<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
         let mut node = DynamicNode::<CAP, TYPE>::new();
 
-        node.add_child(9, NodePtr::from_usize(2));
-        assert_eq!(node.find_key(9).unwrap(), NodePtr::from_usize(2));
+        node.add_child(9, NodePtr::from_usize(1));
+        assert_eq!(node.find_key(9).unwrap(), NodePtr::from_usize(1));
         assert!(node.find_key(10).is_none());
         assert!(node.remove_child(9).is_some());
         assert!(node.remove_child(9).is_none());
@@ -267,17 +289,17 @@ mod test {
         let mut node = DynamicNode::<CAP, TYPE>::new();
 
         for i in 0..CAP {
-            node.add_child(i as u8, NodePtr::from_usize(2));
+            node.add_child(i as u8, NodePtr::from_usize(1));
         }
 
-        node.add_child(10, NodePtr::from_usize(2));
+        node.add_child(10, NodePtr::from_usize(1));
     }
 
     fn do_erases<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
         let mut node = DynamicNode::<CAP, TYPE>::new();
 
         for i in 0..u8::MAX {
-            node.add_child(i, NodePtr::from_usize(2));
+            node.add_child(i, NodePtr::from_usize(1));
             assert!(node.remove_child(i).is_some());
         }
     }
@@ -285,25 +307,25 @@ mod test {
     fn do_insert_duplicate<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
         let mut node = DynamicNode::<CAP, TYPE>::new();
 
-        assert!(node.add_child(1, NodePtr::from_usize(10)).is_none());
+        assert!(node.add_child(1, NodePtr::from_usize(11)).is_none());
         assert_eq!(
-            node.add_child(1, NodePtr::from_usize(100)).unwrap(),
-            NodePtr::from_usize(10)
+            node.add_child(1, NodePtr::from_usize(101)).unwrap(),
+            NodePtr::from_usize(11)
         );
 
-        assert!(node.add_child(2, NodePtr::from_usize(20)).is_none());
-        assert!(node.add_child(3, NodePtr::from_usize(30)).is_none());
-        assert_eq!(node.remove_child(2).unwrap(), NodePtr::from_usize(20));
+        assert!(node.add_child(2, NodePtr::from_usize(21)).is_none());
+        assert!(node.add_child(3, NodePtr::from_usize(31)).is_none());
+        assert_eq!(node.remove_child(2).unwrap(), NodePtr::from_usize(21));
         assert_eq!(
-            node.add_child(3, NodePtr::from_usize(300)).unwrap(),
-            NodePtr::from_usize(30)
+            node.add_child(3, NodePtr::from_usize(301)).unwrap(),
+            NodePtr::from_usize(31)
         );
-        assert!(node.add_child(2, NodePtr::from_usize(200)).is_none());
+        assert!(node.add_child(2, NodePtr::from_usize(201)).is_none());
         assert_eq!(
-            node.add_child(2, NodePtr::from_usize(2000)).unwrap(),
-            NodePtr::from_usize(200)
+            node.add_child(2, NodePtr::from_usize(2001)).unwrap(),
+            NodePtr::from_usize(201)
         );
-        assert_eq!(node.find_key(2).unwrap(), NodePtr::from_usize(2000));
+        assert_eq!(node.find_key(2).unwrap(), NodePtr::from_usize(2001));
     }
 
     #[test]
@@ -353,7 +375,7 @@ mod test {
         let mut node = Node4::new();
 
         for i in 0..Node4::CAPACITY {
-            node.add_child(i as u8, NodePtr::from_usize(i * 10));
+            node.add_child(i as u8, NodePtr::from_usize(i * 10 + 1));
         }
 
         assert!(node.should_grow());
@@ -364,7 +386,7 @@ mod test {
         let mut node = Node16::new();
 
         for i in 0..Node16::CAPACITY {
-            node.add_child(i as u8, NodePtr::from_usize(i * 10));
+            node.add_child(i as u8, NodePtr::from_usize(i * 10 + 1));
         }
 
         assert!(node.should_grow());
@@ -374,7 +396,7 @@ mod test {
     fn node4_grow_to_node16() {
         let mut node4 = Node4::new();
         for i in 0..Node4::CAPACITY - 1 {
-            node4.add_child(i as u8, NodePtr::from_usize(i * 10 + 100));
+            node4.add_child(i as u8, NodePtr::from_usize(i * 10 + 101));
         }
 
         let node16 = node4.grow();
@@ -382,9 +404,9 @@ mod test {
         assert_eq!(node16.header.size(), Node4::CAPACITY - 1);
         assert_eq!(node16.header.node_type(), NodeType::Node16);
 
-        assert_eq!(node16.find_key(0).unwrap(), NodePtr::from_usize(100));
-        assert_eq!(node16.find_key(1).unwrap(), NodePtr::from_usize(110));
-        assert_eq!(node16.find_key(2).unwrap(), NodePtr::from_usize(120));
+        assert_eq!(node16.find_key(0).unwrap(), NodePtr::from_usize(101));
+        assert_eq!(node16.find_key(1).unwrap(), NodePtr::from_usize(111));
+        assert_eq!(node16.find_key(2).unwrap(), NodePtr::from_usize(121));
         for i in Node4::CAPACITY..=u8::MAX as usize {
             assert!(node16.find_key(i as u8).is_none());
         }
@@ -394,7 +416,7 @@ mod test {
     fn node16_grow_to_node48() {
         let mut node16 = Node16::new();
         for i in 0..Node16::CAPACITY - 1 {
-            node16.add_child(i as u8, NodePtr::from_usize(i * 10 + 100));
+            node16.add_child(i as u8, NodePtr::from_usize(i * 10 + 101));
         }
 
         let node48 = node16.grow();
@@ -405,7 +427,7 @@ mod test {
         for i in 0..Node16::CAPACITY - 1 {
             assert_eq!(
                 node48.find_key(i as u8).unwrap(),
-                NodePtr::from_usize(i * 10 + 100)
+                NodePtr::from_usize(i * 10 + 101)
             );
         }
         for i in Node16::CAPACITY..=u8::MAX as usize {
@@ -417,7 +439,7 @@ mod test {
     fn node16_shrink_to_node4() {
         let mut node16 = Node16::new();
         for i in 0..Node16::CAPACITY - 1 {
-            node16.add_child(i as u8, NodePtr::from_usize(i * 10 + 100));
+            node16.add_child(i as u8, NodePtr::from_usize(i * 10 + 101));
         }
         let mut i = 0;
         while !node16.should_shrink() {
@@ -435,11 +457,37 @@ mod test {
                 // the last two elements
                 assert_eq!(
                     node4.find_key(i as u8).unwrap(),
-                    NodePtr::from_usize(i * 10 + 100)
+                    NodePtr::from_usize(i * 10 + 101)
                 );
             } else {
                 assert!(node4.find_key(i as u8).is_none());
             }
         }
+    }
+
+    #[test]
+    fn drop_node4() {
+        let mut node4 = Node4::new();
+        for i in 0..4 {
+            let leaf_ptr = NodePtr::boxed(NodeLeaf::new(
+                vec![i],
+                NodePtr::from_usize(i as usize * 8 + 1024),
+            ));
+            node4.add_child(i, leaf_ptr);
+        }
+        drop(node4);
+    }
+
+    #[test]
+    fn drop_node16() {
+        let mut node16 = Node16::new();
+        for i in 0..4 {
+            let leaf_ptr = NodePtr::boxed(NodeLeaf::new(
+                vec![i],
+                NodePtr::from_usize(i as usize * 8 + 1024),
+            ));
+            node16.add_child(i, leaf_ptr);
+        }
+        drop(node16);
     }
 }
