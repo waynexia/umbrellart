@@ -538,25 +538,18 @@ mod test {
         root.drop();
     }
 
-    #[test]
-    fn expend_stored_prefix() {
-        let cases = [
-            vec![1],
-            vec![0, 0, 1],
-            vec![0, 0, 0, 0],
-            vec![3, 3, 3, 3],
-            vec![4, 4, 4, 4, 4],
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(i, key)| {
-            let leaf_ptr = NodePtr::boxed(NodeLeaf::new(
-                key.clone(),
-                NodePtr::from_usize(i as usize * 8 + 1024 + 1),
-            ));
-            (key, leaf_ptr)
-        })
-        .collect::<Vec<_>>();
+    fn do_insert_search_test(keys: Vec<Vec<u8>>) {
+        let cases = keys
+            .into_iter()
+            .enumerate()
+            .map(|(i, key)| {
+                let leaf_ptr = NodePtr::boxed(NodeLeaf::new(
+                    key.clone(),
+                    NodePtr::from_usize(i as usize * 8 + 1024 + 1),
+                ));
+                (key, leaf_ptr)
+            })
+            .collect::<Vec<_>>();
 
         let mut root = NodePtr::default();
         for (key, leaf) in cases.clone() {
@@ -570,5 +563,31 @@ mod test {
         }
 
         root.drop();
+    }
+
+    #[test]
+    fn expend_stored_prefix() {
+        do_insert_search_test(vec![
+            vec![1],
+            vec![0, 0, 1],
+            vec![0, 0, 0, 0],
+            vec![3, 3, 3, 3],
+            vec![4, 4, 4, 4, 4],
+        ]);
+    }
+
+    #[test]
+    fn expand_optimistic_omitted_prefix() {
+        do_insert_search_test(vec![
+            vec![255, 0, 255],
+            vec![
+                255, 255, 7, 10, 10, 96, 10, 10, 10, 0, 10, 0, 0, 96, 10, 10, 10, 10, 10, 10, 7,
+                255, 255, 10, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            vec![255, 10, 255, 255, 255, 255, 7, 7, 7],
+            vec![255, 255, 255, 7],
+            vec![255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 7, 7],
+            vec![120],
+        ])
     }
 }

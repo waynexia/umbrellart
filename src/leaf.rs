@@ -58,9 +58,8 @@ impl NodeLeaf {
                 break;
             }
         }
-        index = index.checked_sub(1).unwrap_or(0);
 
-        &lhs_key[bias..bias + index]
+        &lhs_key[bias..index]
     }
 
     pub fn is_key_match(&self, key: &[u8]) -> bool {
@@ -81,5 +80,17 @@ mod test {
 
         let res = lhs.get_common_key(&rhs, 1);
         assert_eq!(res, &[0]);
+    }
+
+    #[test]
+    fn calc_not_inlined_common_key() {
+        let lhs = NodeLeaf::new(vec![255, 255, 255, 7], NodePtr::from_usize(1));
+        let rhs = NodeLeaf::new(
+            vec![255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 7, 7],
+            NodePtr::from_usize(1),
+        );
+
+        let res = lhs.get_common_key(&rhs, 2);
+        assert_eq!(res, &[255]);
     }
 }
