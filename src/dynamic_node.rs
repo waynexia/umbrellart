@@ -169,8 +169,10 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
 
 impl<const CAPACITY: usize, const TYPE: u8> Drop for DynamicNode<CAPACITY, TYPE> {
     fn drop(&mut self) {
-        for i in 0..self.header.size() {
-            self.children[i].drop();
+        for child in self.children {
+            if !child.is_null() {
+                child.drop();
+            }
         }
     }
 }
