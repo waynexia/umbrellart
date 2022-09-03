@@ -30,8 +30,8 @@ impl NodeLeaf {
         Box::into_inner(Box::from_raw(ptr.0 as *const Self as *mut Self))
     }
 
-    pub fn load_key(&self) -> Option<Vec<u8>> {
-        Some(self.load_key_ref().to_owned())
+    pub fn load_key(&self) -> Option<&[u8]> {
+        Some(self.load_key_ref())
     }
 
     fn load_key_ref(&self) -> &[u8] {
@@ -49,18 +49,37 @@ impl NodeLeaf {
 
         let lhs_key = self.load_key_ref();
         let rhs_key = other.load_key_ref();
-        let len = lhs_key.len().min(rhs_key.len());
+        let valid = lhs_key.len().min(rhs_key.len());
 
-        while index < len {
+        while index < valid {
             if lhs_key[index] == rhs_key[index] {
                 index += 1;
             } else {
                 break;
             }
         }
+        index = index.checked_sub(1).unwrap_or(0);
 
         &lhs_key[bias..bias + index]
+    }
+
+    pub fn is_key_match(&self, key: &[u8]) -> bool {
+        self.key == key
     }
 }
 
 // todo: impl Drop for NodeLeaf
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn calc_common_key() {
+        let lhs = NodeLeaf::new(vec![0, 0, 1], NodePtr::from_usize(1));
+        let rhs = NodeLeaf::new(vec![0, 0, 0, 0], NodePtr::from_usize(1));
+
+        let res = lhs.get_common_key(&rhs, 1);
+        assert_eq!(res, &[0]);
+    }
+}

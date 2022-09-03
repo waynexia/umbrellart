@@ -5,6 +5,7 @@ use crate::dynamic_node::{Node16, Node4};
 use crate::leaf::NodeLeaf;
 use crate::node_256::Node256;
 use crate::node_48::Node48;
+use crate::utils;
 
 type PrefixCount = u32;
 
@@ -86,8 +87,15 @@ impl Header {
         &self.prefix[0..self.prefix_len as usize]
     }
 
+    /// Get the actual prefix's length, include optimistic ignored parts.
     pub fn prefix_len(&self) -> usize {
         self.prefix_len as usize
+    }
+
+    pub fn set_prefix(&mut self, new_prefix: &[u8]) {
+        let valid = new_prefix.len().min(Self::MAX_PREFIX_STORED);
+        self.prefix[0..valid].copy_from_slice(&new_prefix[0..valid]);
+        self.prefix_len = new_prefix.len() as _;
     }
 
     /// Increase item count.
@@ -260,25 +268,34 @@ pub(crate) struct Node<V> {
 }
 
 impl<V> Node<V> {
-    pub fn search<'a>(node_ref: NodePtr, key: &[u8]) -> Option<&'a V> {
+    pub fn search<'a>(node_ref: &'a NodePtr, key: &[u8]) -> Option<&'a NodePtr> {
         let mut curr_node = node_ref;
         let key_len = key.len();
         let mut depth = 0;
         let mut has_optimistic_skipped = false;
 
         loop {
+            if curr_node.is_null() {
+                return None;
+            }
+
             let header = curr_node.try_as_header()?;
-            let (matched, skipped) = header.compare_prefix_fully(&key[depth..]);
-            has_optimistic_skipped |= skipped;
+            if header.node_type() == NodeType::Leaf {
+                let leaf = curr_node.cast_to::<NodeLeaf>().unwrap();
+                if !has_optimistic_skipped || leaf.is_key_match(key) {
+                    return Some(curr_node);
+                }
+                return None;
+            }
+
+            let (matched, is_optimistic_match) = header.compare_prefix_fully(&key[depth..]);
+            has_optimistic_skipped |= is_optimistic_match;
             if !matched {
                 return None;
             }
             depth += header.prefix_len();
-            curr_node = Self::find_key(curr_node, key[depth])?;
-
-            if depth == key_len {
-                todo!("check result and return")
-            }
+            curr_node = Node::<V>::find_key(*curr_node, key[depth])?;
+            depth += 1;
         }
     }
 
@@ -294,7 +311,7 @@ impl<V> Node<V> {
                 return None;
             }
 
-            let header = curr_node.try_as_header_mut().unwrap();
+            let header = curr_node.try_as_header().unwrap();
             // expand leaf node to a Node4
             if header.node_type() == NodeType::Leaf {
                 // Safety: both `curr_node` and `leaf` should be legal node pointers.
@@ -315,41 +332,46 @@ impl<V> Node<V> {
             }
 
             // check how many prefix bytes are matched
-            let (matched, is_optimistic_match) = header.compare_prefix(&key[depth..]);
+            let (mut matched, is_optimistic_match) = header.compare_prefix(&key[depth..]);
+            let mut curr_prefix = header.prefix().to_owned(); // todo: is this copy avoidable?
             if is_optimistic_match {
-                todo!("compare with full prefix");
+                // Safety: Non-null node should contains k-v pair(s)
+                let full_key = Node::<V>::load_full_key(curr_node).unwrap();
+                matched = utils::compare_slices(&key[depth..], &full_key[depth..]);
+                curr_prefix = full_key[depth..].to_vec();
             }
 
             // prefix mismatch, need to generate a new inner node for the common part
             if matched != header.prefix_len() {
+                // truncate old node's prefix
+                let header = curr_node.try_as_header_mut().unwrap();
+                header.set_prefix(&curr_prefix[matched + 1..]);
+
                 // make a new parent node then add leaf and curr_node to it.
-                let new_header = Header::with_prefix(NodeType::Node4, &key[depth..]);
+                let new_header = Header::with_prefix(NodeType::Node4, &key[depth..matched]);
                 let mut new_node = Node4::from_header(new_header);
                 new_node.add_child(key[depth + matched], leaf);
-                // todo: should copy from a fully expanded prefix, not copy_within.
-                // todo: set header's length
-                header
-                    .prefix
-                    .copy_within(matched..Header::MAX_PREFIX_STORED, 0);
-                // todo: handle omitted prefix (header.prefix)
-                new_node.add_child(header.prefix[matched], *curr_node);
+                new_node.add_child(curr_prefix[matched], *curr_node);
 
                 // replace curr_node with the new node.
                 *curr_node = NodePtr::boxed(new_node);
                 return None;
             }
+
+            // need not to change current node's prefix, continue insertion
             depth += matched;
             let next_node = Node::<V>::find_key_mut(*curr_node, key[depth]);
             if let Some(node) = next_node {
+                // insert into next level
                 curr_node = node;
+                depth += 1;
                 continue;
             } else {
+                // insert into current node
                 if Node::<V>::should_grow(*curr_node) {
                     *curr_node = Node::<V>::grow(*curr_node);
                 }
-                Node::<V>::add_child(*curr_node, key[depth], leaf);
-                // todo: handle the result of `add_child`
-                return None;
+                return Node::<V>::add_child(*curr_node, key[depth], leaf);
             }
         }
     }
@@ -391,7 +413,7 @@ macro_rules! dispatch_node_fn {
 
 /// Inner methods implementations for variant nodes.
 impl<V> Node<V> {
-    dispatch_node_fn!(find_key, (key: u8), Option<NodePtr>);
+    dispatch_node_fn!(find_key, (key: u8), Option<&'static NodePtr>);
 
     dispatch_node_fn!(find_key_mut, (key: u8), Option<&'static mut NodePtr>);
 
@@ -454,6 +476,37 @@ impl<V> Node<V> {
             }
         }
     }
+
+    fn load_full_key(node_ptr: &NodePtr) -> Option<Vec<u8>> {
+        let header = node_ptr.try_as_header().unwrap();
+        match header.node_type() {
+            NodeType::Node4 => {
+                let node: &mut Node4 =
+                    unsafe { &mut *(std::mem::transmute::<*const (), *mut Node4>(node_ptr.0)) };
+                Self::load_full_key(node.first_child()?)
+            }
+            NodeType::Node16 => {
+                let node: &mut Node16 =
+                    unsafe { &mut *(std::mem::transmute::<*const (), *mut Node16>(node_ptr.0)) };
+                Self::load_full_key(node.first_child()?)
+            }
+            NodeType::Node48 => {
+                let node: &mut Node48 =
+                    unsafe { &mut *(std::mem::transmute::<*const (), *mut Node48>(node_ptr.0)) };
+                Self::load_full_key(node.first_child()?)
+            }
+            NodeType::Node256 => {
+                let node: &mut Node256 =
+                    unsafe { &mut *(std::mem::transmute::<*const (), *mut Node256>(node_ptr.0)) };
+                Self::load_full_key(node.first_child()?)
+            }
+            NodeType::Leaf => {
+                let node: &mut NodeLeaf =
+                    unsafe { &mut *(std::mem::transmute::<*const (), *mut NodeLeaf>(node_ptr.0)) };
+                node.load_key().map(|slice| slice.to_owned())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -480,6 +533,40 @@ mod test {
             println!("leaf pointer: {:?}", leaf_ptr);
             assert!(Node::<()>::insert(&mut root, &[i], leaf_ptr).is_none());
             println!("root pointer: {:?}", root);
+        }
+
+        root.drop();
+    }
+
+    #[test]
+    fn expend_stored_prefix() {
+        let cases = [
+            vec![1],
+            vec![0, 0, 1],
+            vec![0, 0, 0, 0],
+            vec![3, 3, 3, 3],
+            vec![4, 4, 4, 4, 4],
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, key)| {
+            let leaf_ptr = NodePtr::boxed(NodeLeaf::new(
+                key.clone(),
+                NodePtr::from_usize(i as usize * 8 + 1024 + 1),
+            ));
+            (key, leaf_ptr)
+        })
+        .collect::<Vec<_>>();
+
+        let mut root = NodePtr::default();
+        for (key, leaf) in cases.clone() {
+            println!("inserting {:?}, leaf {:?}", key, leaf);
+            Node::<()>::insert(&mut root, &key, leaf);
+        }
+        for (key, leaf) in cases.clone() {
+            println!("searching {:?}", key);
+            let result = Node::<()>::search(&root, &key).unwrap();
+            assert_eq!(*result, leaf);
         }
 
         root.drop();

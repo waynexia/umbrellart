@@ -48,11 +48,11 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
         Box::into_inner(Box::from_raw(ptr.0 as *const Self as *mut Self))
     }
 
-    pub fn find_key(&self, key: u8) -> Option<NodePtr> {
+    pub fn find_key(&self, key: u8) -> Option<&NodePtr> {
         for (index, ptr) in self.children.iter().enumerate() {
             if !ptr.is_null() {
                 if self.keys[index] == key {
-                    return Some(self.children[index]);
+                    return Some(&self.children[index]);
                 }
             }
         }
@@ -66,6 +66,16 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
                 if self.keys[index] == key {
                     return Some(&mut self.children[index]);
                 }
+            }
+        }
+
+        None
+    }
+
+    pub fn first_child(&self) -> Option<&NodePtr> {
+        for ptr in &self.children {
+            if !ptr.is_null() {
+                return Some(ptr);
             }
         }
 
@@ -278,7 +288,7 @@ mod test {
         let mut node = DynamicNode::<CAP, TYPE>::new();
 
         node.add_child(9, NodePtr::from_usize(1));
-        assert_eq!(node.find_key(9).unwrap(), NodePtr::from_usize(1));
+        assert_eq!(*node.find_key(9).unwrap(), NodePtr::from_usize(1));
         assert!(node.find_key(10).is_none());
         assert!(node.remove_child(9).is_some());
         assert!(node.remove_child(9).is_none());
@@ -325,7 +335,7 @@ mod test {
             node.add_child(2, NodePtr::from_usize(2001)).unwrap(),
             NodePtr::from_usize(201)
         );
-        assert_eq!(node.find_key(2).unwrap(), NodePtr::from_usize(2001));
+        assert_eq!(*node.find_key(2).unwrap(), NodePtr::from_usize(2001));
     }
 
     #[test]
@@ -404,9 +414,9 @@ mod test {
         assert_eq!(node16.header.size(), Node4::CAPACITY - 1);
         assert_eq!(node16.header.node_type(), NodeType::Node16);
 
-        assert_eq!(node16.find_key(0).unwrap(), NodePtr::from_usize(101));
-        assert_eq!(node16.find_key(1).unwrap(), NodePtr::from_usize(111));
-        assert_eq!(node16.find_key(2).unwrap(), NodePtr::from_usize(121));
+        assert_eq!(*node16.find_key(0).unwrap(), NodePtr::from_usize(101));
+        assert_eq!(*node16.find_key(1).unwrap(), NodePtr::from_usize(111));
+        assert_eq!(*node16.find_key(2).unwrap(), NodePtr::from_usize(121));
         for i in Node4::CAPACITY..=u8::MAX as usize {
             assert!(node16.find_key(i as u8).is_none());
         }
@@ -426,7 +436,7 @@ mod test {
 
         for i in 0..Node16::CAPACITY - 1 {
             assert_eq!(
-                node48.find_key(i as u8).unwrap(),
+                *node48.find_key(i as u8).unwrap(),
                 NodePtr::from_usize(i * 10 + 101)
             );
         }
@@ -456,7 +466,7 @@ mod test {
             if i == 13 || i == 14 {
                 // the last two elements
                 assert_eq!(
-                    node4.find_key(i as u8).unwrap(),
+                    *node4.find_key(i as u8).unwrap(),
                     NodePtr::from_usize(i * 10 + 101)
                 );
             } else {

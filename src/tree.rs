@@ -10,7 +10,9 @@ pub struct Art<V> {
 
 impl<V> Art<V> {
     pub fn get(&self, key: &[u8]) -> Option<&V> {
-        Node::search(self.root, key)
+        let _ = Node::<V>::search(&self.root, key);
+
+        todo!()
     }
 
     pub fn insert(&mut self, key: &[u8], value: V) -> Option<V> {

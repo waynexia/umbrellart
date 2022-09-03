@@ -59,11 +59,11 @@ impl Node48 {
         Box::into_inner(Box::from_raw(ptr.0 as *const Self as *mut Self))
     }
 
-    pub fn find_key(&self, key: u8) -> Option<NodePtr> {
+    pub fn find_key(&self, key: u8) -> Option<&NodePtr> {
         let index = self.keys[key as usize];
 
         if index != Self::NULL_INDEX && !self.children[index as usize].is_null() {
-            Some(self.children[index as usize])
+            Some(&self.children[index as usize])
         } else {
             None
         }
@@ -77,6 +77,16 @@ impl Node48 {
         } else {
             None
         }
+    }
+
+    pub fn first_child(&self) -> Option<&NodePtr> {
+        for (index, key) in self.keys.iter().enumerate() {
+            if *key != Self::NULL_INDEX {
+                return Some(&self.children[index]);
+            }
+        }
+
+        None
     }
 
     /// # Notice
@@ -214,7 +224,7 @@ mod test {
         let mut node = Node48::new();
 
         node.add_child(u8::MAX, NodePtr::from_usize(1));
-        assert_eq!(node.find_key(u8::MAX).unwrap(), NodePtr::from_usize(1));
+        assert_eq!(*node.find_key(u8::MAX).unwrap(), NodePtr::from_usize(1));
         assert!(node.find_key(0).is_none());
         assert!(node.find_key(2).is_none());
         assert!(node.find_key(u8::MAX - 1).is_none());
@@ -264,7 +274,7 @@ mod test {
             node.add_child(2, NodePtr::from_usize(2001)).unwrap(),
             NodePtr::from_usize(201)
         );
-        assert_eq!(node.find_key(2).unwrap(), NodePtr::from_usize(2001));
+        assert_eq!(*node.find_key(2).unwrap(), NodePtr::from_usize(2001));
     }
 
     #[test]
@@ -296,7 +306,7 @@ mod test {
 
         for i in 0..Node48::CAPACITY - 1 {
             assert_eq!(
-                node256.find_key(i as u8).unwrap(),
+                *node256.find_key(i as u8).unwrap(),
                 NodePtr::from_usize(i * 10 + 41)
             );
         }
@@ -321,7 +331,7 @@ mod test {
 
         for i in 0..Node16::CAPACITY - 1 {
             assert_eq!(
-                node16.find_key(i as u8).unwrap(),
+                *node16.find_key(i as u8).unwrap(),
                 NodePtr::from_usize(i * 10 + 41)
             );
         }

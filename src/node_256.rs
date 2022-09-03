@@ -50,8 +50,12 @@ impl Node256 {
         Box::into_inner(Box::from_raw(ptr.0 as *const Self as *mut Self))
     }
 
-    pub fn find_key(&self, key: u8) -> Option<NodePtr> {
-        self.children[key as usize].into_option()
+    pub fn find_key(&self, key: u8) -> Option<&NodePtr> {
+        if self.children[key as usize].is_null() {
+            None
+        } else {
+            Some(&self.children[key as usize])
+        }
     }
 
     pub fn find_key_mut(&mut self, key: u8) -> Option<&mut NodePtr> {
@@ -60,6 +64,16 @@ impl Node256 {
         } else {
             Some(&mut self.children[key as usize])
         }
+    }
+
+    pub fn first_child(&self) -> Option<&NodePtr> {
+        for ptr in &self.children {
+            if !ptr.is_null() {
+                return Some(ptr);
+            }
+        }
+
+        None
     }
 
     pub fn add_child(&mut self, key: u8, child: NodePtr) -> Option<NodePtr> {
@@ -145,7 +159,7 @@ mod test {
         let mut node = Node256::new();
 
         node.add_child(u8::MAX, NodePtr::from_usize(1));
-        assert_eq!(node.find_key(u8::MAX).unwrap(), NodePtr::from_usize(1));
+        assert_eq!(*node.find_key(u8::MAX).unwrap(), NodePtr::from_usize(1));
         assert!(node.find_key(0).is_none());
         assert!(node.find_key(2).is_none());
         assert!(node.find_key(u8::MAX - 1).is_none());
@@ -178,7 +192,7 @@ mod test {
             node.add_child(2, NodePtr::from_usize(2001)).unwrap(),
             NodePtr::from_usize(201)
         );
-        assert_eq!(node.find_key(2).unwrap(), NodePtr::from_usize(2001));
+        assert_eq!(*node.find_key(2).unwrap(), NodePtr::from_usize(2001));
     }
 
     #[test]
@@ -197,7 +211,7 @@ mod test {
 
         for i in 0..Node48::CAPACITY - 1 {
             assert_eq!(
-                node48.find_key(i as u8).unwrap(),
+                *node48.find_key(i as u8).unwrap(),
                 NodePtr::from_usize(i * 10 + 201)
             );
         }
