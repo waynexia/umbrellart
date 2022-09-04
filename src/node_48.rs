@@ -42,6 +42,7 @@ impl Node48 {
         }
     }
 
+    #[cfg(test)]
     pub fn new() -> Self {
         let header = Header::new(NodeType::Node48);
         Self {

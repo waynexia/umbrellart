@@ -93,6 +93,11 @@ impl Header {
     }
 
     pub fn set_prefix(&mut self, new_prefix: &[u8]) {
+        // leaf node doesn't have prefix
+        if self.node_type == NodeType::Leaf {
+            return;
+        }
+
         let valid = new_prefix.len().min(Self::MAX_PREFIX_STORED);
         self.prefix[0..valid].copy_from_slice(&new_prefix[0..valid]);
         self.prefix_len = new_prefix.len() as _;
@@ -167,16 +172,17 @@ impl Header {
 pub(crate) struct NodePtr(pub(crate) *mut ());
 
 impl NodePtr {
-    #[inline]
-    pub fn from_ptr<T>(ptr: *const T) -> Self {
-        Self(ptr as _)
-    }
-
     /// "Leak" a item and return its pointer
     #[inline]
     pub fn boxed<T>(item: T) -> Self {
         let ptr = Box::leak(Box::new(item));
         Self(ptr as *mut T as *mut ())
+    }
+
+    #[inline]
+    pub fn unbox<T>(self) -> T {
+        assert!(self.is_valid_rust_pointer());
+        unsafe { Box::into_inner(Box::from_raw(self.0 as *const T as *mut T)) }
     }
 
     #[inline]
@@ -188,6 +194,16 @@ impl NodePtr {
         unsafe { Some(&*(self.0 as *const T)) }
     }
 
+    #[inline]
+    pub fn cast_to_mut<T>(&mut self) -> Option<&mut T> {
+        if !self.is_valid_rust_pointer() {
+            return None;
+        }
+
+        unsafe { Some(&mut *(self.0 as *const T as *mut T)) }
+    }
+
+    #[cfg(test)]
     #[inline]
     pub fn from_usize(ptr: usize) -> Self {
         Self(ptr as _)
@@ -270,7 +286,6 @@ pub(crate) struct Node<V> {
 impl<V> Node<V> {
     pub fn search<'a>(node_ref: &'a NodePtr, key: &[u8]) -> Option<&'a NodePtr> {
         let mut curr_node = node_ref;
-        let key_len = key.len();
         let mut depth = 0;
         let mut has_optimistic_skipped = false;
 
@@ -294,14 +309,13 @@ impl<V> Node<V> {
                 return None;
             }
             depth += header.prefix_len();
-            curr_node = Node::<V>::find_key(*curr_node, key[depth])?;
+            curr_node = Self::find_key(*curr_node, key[depth])?;
             depth += 1;
         }
     }
 
     pub fn insert(node_ref: &mut NodePtr, key: &[u8], leaf: NodePtr) -> Option<NodePtr> {
         let mut curr_node = node_ref;
-        let key_len = key.len();
         let mut depth = 0;
 
         loop {
@@ -336,7 +350,7 @@ impl<V> Node<V> {
             let mut curr_prefix = header.prefix().to_owned(); // todo: is this copy avoidable?
             if is_optimistic_match {
                 // Safety: Non-null node should contains k-v pair(s)
-                let full_key = Node::<V>::load_full_key(curr_node).unwrap();
+                let full_key = Self::load_full_key(curr_node).unwrap();
                 matched = utils::compare_slices(&key[depth..], &full_key[depth..]);
                 curr_prefix = full_key[depth..].to_vec();
             }
@@ -360,7 +374,7 @@ impl<V> Node<V> {
 
             // need not to change current node's prefix, continue insertion
             depth += matched;
-            let next_node = Node::<V>::find_key_mut(*curr_node, key[depth]);
+            let next_node = Self::find_key_mut(*curr_node, key[depth]);
             if let Some(node) = next_node {
                 // insert into next level
                 curr_node = node;
@@ -368,11 +382,83 @@ impl<V> Node<V> {
                 continue;
             } else {
                 // insert into current node
-                if Node::<V>::should_grow(*curr_node) {
-                    *curr_node = Node::<V>::grow(*curr_node);
+                if Self::should_grow(*curr_node) {
+                    *curr_node = Self::grow(*curr_node);
                 }
-                return Node::<V>::add_child(*curr_node, key[depth], leaf);
+                return Self::add_child(*curr_node, key[depth], leaf);
             }
+        }
+    }
+
+    pub fn remove(node_ref: &mut NodePtr, key: &[u8]) -> Option<NodePtr> {
+        let mut curr_node = node_ref;
+        let mut depth = 0;
+
+        loop {
+            if curr_node.is_null() {
+                return None;
+            }
+
+            let header = curr_node.try_as_header()?;
+            if header.node_type() == NodeType::Leaf {
+                let leaf = curr_node.cast_to::<NodeLeaf>()?;
+                let mut result = None;
+                if leaf.is_key_match(key) {
+                    // replace this leaf node with NIL
+                    result = Some(*curr_node);
+                    *curr_node = NodePtr::default();
+                }
+                return result;
+            }
+
+            let (matched, _is_optimistic_match) = header.compare_prefix(&key[depth..]);
+
+            if matched != header.prefix_len() {
+                return None;
+            }
+
+            depth += matched;
+            let next_node = Self::find_key_mut(*curr_node, key[depth])?;
+            let next_header = next_node.try_as_header()?;
+            if next_header.node_type() == NodeType::Leaf {
+                let leaf = next_node.cast_to::<NodeLeaf>()?;
+                if !leaf.is_key_match(key) {
+                    return None;
+                }
+                let res = Self::remove_child(*curr_node, key[depth])?;
+                if Self::should_shrink(*curr_node) {
+                    *curr_node = Self::shrink(*curr_node);
+                } else {
+                    // `should_shrink` will transmute `curr_node` to a mut ref, which invalids
+                    // previous cast. Re-cast here to avoid UB.
+                    let header = curr_node.try_as_header()?;
+                    if header.node_type() == NodeType::Node4 && header.size() == 1 {
+                        // collapse the inner Node4 with only one child.
+                        // todo: maybe allow Node4 shrink to NodeLeaf
+                        let curr_prefix = header.prefix().to_owned();
+                        let node4 = curr_node.cast_to_mut::<Node4>()?;
+                        let first_key = node4.first_key()?;
+                        let mut last_child = node4.first_child()?.clone();
+                        let last_child_header = last_child.try_as_header_mut()?;
+                        // adjust prefix
+                        last_child_header.set_prefix(
+                            &[
+                                curr_prefix,
+                                vec![first_key],
+                                last_child_header.prefix().to_owned(),
+                            ]
+                            .concat(),
+                        );
+                        // remove that Node4
+                        node4.remove_child(first_key);
+                        (*curr_node).unbox::<Node4>();
+                        *curr_node = last_child;
+                    }
+                }
+                return Some(res);
+            }
+            curr_node = next_node;
+            depth += 1;
         }
     }
 }
@@ -538,7 +624,7 @@ mod test {
         root.drop();
     }
 
-    fn do_insert_search_test(keys: Vec<Vec<u8>>) {
+    fn do_insert_search_drop_test(keys: Vec<Vec<u8>>) {
         let cases = keys
             .into_iter()
             .enumerate()
@@ -556,10 +642,18 @@ mod test {
             println!("inserting {:?}, leaf {:?}", key, leaf);
             Node::<()>::insert(&mut root, &key, leaf);
         }
+        println!("insert finish");
         for (key, leaf) in cases.clone() {
             println!("searching {:?}", key);
             let result = Node::<()>::search(&root, &key).unwrap();
             assert_eq!(*result, leaf);
+        }
+        println!("search finish");
+        for (key, leaf) in cases {
+            println!("removing {:?}", key);
+            let result = Node::<()>::remove(&mut root, &key).unwrap();
+            assert_eq!(result, leaf);
+            result.drop();
         }
 
         root.drop();
@@ -567,7 +661,7 @@ mod test {
 
     #[test]
     fn expend_stored_prefix() {
-        do_insert_search_test(vec![
+        do_insert_search_drop_test(vec![
             vec![1],
             vec![0, 0, 1],
             vec![0, 0, 0, 0],
@@ -578,7 +672,7 @@ mod test {
 
     #[test]
     fn expand_optimistic_omitted_prefix() {
-        do_insert_search_test(vec![
+        do_insert_search_drop_test(vec![
             vec![255, 0, 255],
             vec![
                 255, 255, 7, 10, 10, 96, 10, 10, 10, 0, 10, 0, 0, 96, 10, 10, 10, 10, 10, 10, 7,

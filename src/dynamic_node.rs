@@ -31,6 +31,7 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
         }
     }
 
+    #[cfg(test)]
     pub fn new() -> Self {
         let header = Header::new(Self::TYPE);
         Self {
@@ -76,6 +77,16 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
         for ptr in &self.children {
             if !ptr.is_null() {
                 return Some(ptr);
+            }
+        }
+
+        None
+    }
+
+    pub fn first_key(&self) -> Option<u8> {
+        for (index, ptr) in self.children.iter().enumerate() {
+            if !ptr.is_null() {
+                return Some(self.keys[index]);
             }
         }
 

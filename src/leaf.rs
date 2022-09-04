@@ -5,7 +5,7 @@ use crate::node::{Header, NodePtr, NodeType};
 pub(crate) struct NodeLeaf {
     header: Header,
     key: Vec<u8>,
-    value: NodePtr,
+    pub(crate) value: NodePtr,
 }
 
 impl NodeLeaf {
@@ -63,7 +63,7 @@ impl NodeLeaf {
     }
 
     pub fn is_key_match(&self, key: &[u8]) -> bool {
-        self.key == key
+        self.load_key_ref() == key
     }
 }
 
