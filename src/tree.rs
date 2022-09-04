@@ -9,9 +9,16 @@ pub struct Art<V> {
 }
 
 impl<V> Art<V> {
+    pub fn new() -> Self {
+        Self {
+            root: NodePtr::default(),
+            _phantom: PhantomData,
+        }
+    }
+
     pub fn get(&self, key: &[u8]) -> Option<&V> {
         Node::<V>::search(&self.root, key)
-            .map(NodePtr::cast_to::<V>)
+            .map(|leaf| leaf.cast_to::<NodeLeaf>()?.value.cast_to::<V>())
             .flatten()
     }
 
