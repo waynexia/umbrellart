@@ -84,7 +84,8 @@ impl Header {
 
     /// Retrieve all prefix bytes stored in this header.
     pub fn prefix(&self) -> &[u8] {
-        &self.prefix[0..self.prefix_len as usize]
+        let valid = Self::MAX_PREFIX_STORED.min(self.prefix_len as usize);
+        &self.prefix[0..valid]
     }
 
     /// Get the actual prefix's length, include optimistic ignored parts.
@@ -101,6 +102,10 @@ impl Header {
         let valid = new_prefix.len().min(Self::MAX_PREFIX_STORED);
         self.prefix[0..valid].copy_from_slice(&new_prefix[0..valid]);
         self.prefix_len = new_prefix.len() as _;
+    }
+
+    pub fn is_prefix_omitted(&self) -> bool {
+        self.prefix_len as usize > Self::MAX_PREFIX_STORED
     }
 
     /// Increase item count.
@@ -346,23 +351,29 @@ impl<V> Node<V> {
             }
 
             // check how many prefix bytes are matched
+            // todo: refine these. Only when (1) compare omitted prefix and (2) extending
+            // prefix, need load full key.
+            let prefix_len = header.prefix_len();
             let (mut matched, is_optimistic_match) = header.compare_prefix(&key[depth..]);
-            let mut curr_prefix = header.prefix().to_owned(); // todo: is this copy avoidable?
+            let curr_prefix = if header.is_prefix_omitted() {
+                Self::load_full_key(curr_node).unwrap()[depth..depth + prefix_len].to_vec()
+            } else {
+                header.prefix().to_owned()
+            };
             if is_optimistic_match {
                 // Safety: Non-null node should contains k-v pair(s)
                 let full_key = Self::load_full_key(curr_node).unwrap();
                 matched = utils::compare_slices(&key[depth..], &full_key[depth..]);
-                curr_prefix = full_key[depth..].to_vec();
             }
 
             // prefix mismatch, need to generate a new inner node for the common part
-            if matched != header.prefix_len() {
+            if matched != prefix_len {
                 // truncate old node's prefix
                 let header = curr_node.try_as_header_mut().unwrap();
                 header.set_prefix(&curr_prefix[matched + 1..]);
 
                 // make a new parent node then add leaf and curr_node to it.
-                let new_header = Header::with_prefix(NodeType::Node4, &key[depth..matched]);
+                let new_header = Header::with_prefix(NodeType::Node4, &key[depth..depth + matched]);
                 let mut new_node = Node4::from_header(new_header);
                 new_node.add_child(key[depth + matched], leaf);
                 new_node.add_child(curr_prefix[matched], *curr_node);
@@ -411,7 +422,15 @@ impl<V> Node<V> {
                 return result;
             }
 
-            let (matched, _is_optimistic_match) = header.compare_prefix(&key[depth..]);
+            let (mut matched, is_optimistic_match) = header.compare_prefix(&key[depth..]);
+            if is_optimistic_match {
+                // Safety: Non-null node should contains k-v pair(s)
+                let full_key = Self::load_full_key(curr_node).unwrap();
+                matched = utils::compare_slices(
+                    &key[depth..],
+                    &full_key[depth..depth + header.prefix_len()],
+                );
+            }
 
             if matched != header.prefix_len() {
                 return None;
@@ -435,17 +454,30 @@ impl<V> Node<V> {
                     if header.node_type() == NodeType::Node4 && header.size() == 1 {
                         // collapse the inner Node4 with only one child.
                         // todo: maybe allow Node4 shrink to NodeLeaf
-                        let curr_prefix = header.prefix().to_owned();
+                        let curr_prefix = if header.is_prefix_omitted() {
+                            Self::load_full_key(curr_node).unwrap()
+                                [depth - matched..header.prefix_len()]
+                                .to_vec()
+                        } else {
+                            header.prefix().to_owned()
+                        };
                         let node4 = curr_node.cast_to_mut::<Node4>()?;
                         let first_key = node4.first_key()?;
                         let mut last_child = node4.first_child()?.clone();
                         let last_child_header = last_child.try_as_header_mut()?;
-                        // adjust prefix
+                        // Adjust prefix. `curr_prefix` might be optimistically omitted, but it
+                        // doesn't matter.
                         last_child_header.set_prefix(
                             &[
                                 curr_prefix,
                                 vec![first_key],
                                 last_child_header.prefix().to_owned(),
+                                // omitted part
+                                vec![
+                                    0;
+                                    last_child_header.prefix_len()
+                                        - last_child_header.prefix().len()
+                                ],
                             ]
                             .concat(),
                         );
@@ -683,5 +715,60 @@ mod test {
             vec![255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 7, 7],
             vec![120],
         ])
+    }
+
+    #[test]
+    #[ignore = "duplicate insertion is not considered now"]
+    fn duplicate_keys() {
+        do_insert_search_drop_test(vec![vec![1, 0], vec![1, 0]]);
+    }
+
+    #[test]
+    fn fuzz_case_1() {
+        // reason: common length range is mis-calculated when expanding collapsed
+        // prefix.
+        do_insert_search_drop_test(vec![
+            vec![255, 255, 255, 0],
+            vec![255, 255, 255, 11, 0],
+            vec![7, 7, 0],
+            vec![255, 0],
+        ])
+    }
+
+    #[test]
+    fn fuzz_case_2() {
+        // reason: extending collapsed prefix doesn't consider omitted parts.
+        do_insert_search_drop_test(vec![
+            vec![31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 255, 0],
+            vec![31, 31, 31, 31, 31, 31, 31, 31, 31, 255, 255, 0],
+            vec![255, 0],
+        ])
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn fuzz_case_3() {
+        // reason: `remove` doesn't consider optimistic prefix
+        do_insert_search_drop_test(vec![
+            vec![
+                31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 0,
+            ],
+            vec![31, 31, 31, 31, 31, 31, 31, 31, 31, 0],
+        ])
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn fuzz_case_4() {
+        do_insert_search_drop_test(vec![
+            vec![
+                79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79,
+                0,
+            ],
+            vec![79, 79, 79, 0],
+            vec![
+                79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 0,
+            ],
+        ]);
     }
 }

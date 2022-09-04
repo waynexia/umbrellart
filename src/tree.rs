@@ -38,3 +38,62 @@ impl<V> Art<V> {
         Some(item)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn fuzz_case_5() {
+        let mut art = Art::new();
+        art.insert(
+            &[
+                79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 0,
+            ],
+            1,
+        );
+        art.insert(&[79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 0], 2);
+
+        let result = art
+            .remove(&[79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 0])
+            .unwrap();
+        assert_eq!(result, 2);
+    }
+
+    #[test]
+    fn fuzz_case_6() {
+        let mut art = Art::new();
+        art.insert(
+            &[
+                79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79,
+                0,
+            ],
+            1,
+        );
+        art.insert(&[79, 79, 79, 0], 2);
+        art.insert(
+            &[
+                79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 0,
+            ],
+            3,
+        );
+
+        let result = art.remove(&[79, 79, 79, 0]).unwrap();
+        assert_eq!(result, 2);
+
+        let result = art
+            .remove(&[
+                79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 0,
+            ])
+            .unwrap();
+        assert_eq!(result, 3);
+
+        let result = art
+            .remove(&[
+                79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79,
+                0,
+            ])
+            .unwrap();
+        assert_eq!(result, 1);
+    }
+}
