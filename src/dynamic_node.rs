@@ -51,10 +51,8 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
 
     pub fn find_key(&self, key: u8) -> Option<&NodePtr> {
         for (index, ptr) in self.children.iter().enumerate() {
-            if !ptr.is_null() {
-                if self.keys[index] == key {
-                    return Some(&self.children[index]);
-                }
+            if !ptr.is_null() && self.keys[index] == key {
+                return Some(&self.children[index]);
             }
         }
 
@@ -63,10 +61,8 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
 
     pub fn find_key_mut(&mut self, key: u8) -> Option<&mut NodePtr> {
         for (index, ptr) in self.children.iter().enumerate() {
-            if !ptr.is_null() {
-                if self.keys[index] == key {
-                    return Some(&mut self.children[index]);
-                }
+            if !ptr.is_null() && self.keys[index] == key {
+                return Some(&mut self.children[index]);
             }
         }
 
@@ -74,13 +70,7 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
     }
 
     pub fn first_child(&self) -> Option<&NodePtr> {
-        for ptr in &self.children {
-            if !ptr.is_null() {
-                return Some(ptr);
-            }
-        }
-
-        None
+        self.children.iter().find(|&ptr| !ptr.is_null())
     }
 
     pub fn first_key(&self) -> Option<u8> {

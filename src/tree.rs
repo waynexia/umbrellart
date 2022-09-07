@@ -18,15 +18,13 @@ impl<V> Art<V> {
 
     pub fn get(&self, key: &[u8]) -> Option<&V> {
         Node::<V>::search(&self.root, key)
-            .map(|leaf| leaf.cast_to::<NodeLeaf>()?.value.cast_to::<V>())
-            .flatten()
+            .and_then(|leaf| leaf.cast_to::<NodeLeaf>()?.value.cast_to::<V>())
     }
 
     pub fn insert(&mut self, key: &[u8], value: V) -> Option<V> {
         let leaf = NodeLeaf::new(key.to_vec(), NodePtr::boxed(value));
         Node::<V>::insert(&mut self.root, key, NodePtr::boxed(leaf))
-            .map(|ptr| ptr.into_option())
-            .flatten()
+            .and_then(|ptr| ptr.into_option())
             .map(NodePtr::unbox::<V>)
     }
 
@@ -36,6 +34,12 @@ impl<V> Art<V> {
         leaf.drop();
 
         Some(item)
+    }
+}
+
+impl<V> Default for Art<V> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -50,6 +54,7 @@ mod test {
     use super::*;
 
     #[test]
+    #[cfg(not(miri))]
     fn fuzz_case_5() {
         let mut art = Art::new();
         art.insert(
@@ -67,6 +72,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn fuzz_case_6() {
         let mut art = Art::new();
         art.insert(

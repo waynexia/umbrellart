@@ -147,8 +147,8 @@ impl Header {
         let mut optimistic = self.prefix_len() > Self::MAX_PREFIX_STORED;
 
         let mut match_result = 0;
-        for i in 0..valid_len {
-            if key[i] == self.prefix[i] {
+        for (i, byte) in key.iter().enumerate().take(valid_len) {
+            if *byte == self.prefix[i] {
                 match_result += 1;
             } else {
                 break;
@@ -465,7 +465,7 @@ impl<V> Node<V> {
                         };
                         let node4 = curr_node.cast_to_mut::<Node4>()?;
                         let first_key = node4.first_key()?;
-                        let mut last_child = node4.first_child()?.clone();
+                        let mut last_child = *node4.first_child()?;
                         let last_child_header = last_child.try_as_header_mut()?;
                         // Adjust prefix. `curr_prefix` might be optimistically omitted, but it
                         // doesn't matter.
@@ -775,6 +775,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn fuzz_case_7() {
         do_insert_search_drop_test(vec![
             vec![79, 79, 79, 79, 79, 79, 79, 79, 79, 96, 0],
@@ -786,6 +787,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn fuzz_case_8() {
         do_insert_search_drop_test(vec![
             vec![31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 0],

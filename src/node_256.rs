@@ -68,13 +68,7 @@ impl Node256 {
     }
 
     pub fn first_child(&self) -> Option<&NodePtr> {
-        for ptr in &self.children {
-            if !ptr.is_null() {
-                return Some(ptr);
-            }
-        }
-
-        None
+        self.children.iter().find(|&ptr| !ptr.is_null())
     }
 
     pub fn add_child(&mut self, key: u8, child: NodePtr) -> Option<NodePtr> {
