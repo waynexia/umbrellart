@@ -363,7 +363,8 @@ impl<V> Node<V> {
             if is_optimistic_match {
                 // Safety: Non-null node should contains k-v pair(s)
                 let full_key = Self::load_full_key(curr_node).unwrap();
-                matched = utils::compare_slices(&key[depth..], &full_key[depth..]);
+                matched =
+                    utils::compare_slices(&key[depth..], &full_key[depth..depth + prefix_len]);
             }
 
             // prefix mismatch, need to generate a new inner node for the common part
@@ -454,9 +455,10 @@ impl<V> Node<V> {
                     if header.node_type() == NodeType::Node4 && header.size() == 1 {
                         // collapse the inner Node4 with only one child.
                         // todo: maybe allow Node4 shrink to NodeLeaf
+                        let node_depth = depth - matched;
                         let curr_prefix = if header.is_prefix_omitted() {
                             Self::load_full_key(curr_node).unwrap()
-                                [depth - matched..header.prefix_len()]
+                                [node_depth..node_depth + header.prefix_len()]
                                 .to_vec()
                         } else {
                             header.prefix().to_owned()
@@ -769,6 +771,27 @@ mod test {
             vec![
                 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 0,
             ],
+        ]);
+    }
+
+    #[test]
+    fn fuzz_case_7() {
+        do_insert_search_drop_test(vec![
+            vec![79, 79, 79, 79, 79, 79, 79, 79, 79, 96, 0],
+            vec![79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 0],
+            vec![
+                79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 79, 0,
+            ],
+        ]);
+    }
+
+    #[test]
+    fn fuzz_case_8() {
+        do_insert_search_drop_test(vec![
+            vec![31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 0],
+            vec![31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 0],
+            vec![31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 0],
+            vec![38, 0],
         ]);
     }
 }

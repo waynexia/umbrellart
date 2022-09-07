@@ -39,6 +39,12 @@ impl<V> Art<V> {
     }
 }
 
+impl<V> Drop for Art<V> {
+    fn drop(&mut self) {
+        self.root.drop();
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
