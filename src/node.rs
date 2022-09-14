@@ -341,9 +341,17 @@ impl<V> Node<V> {
                 // Safety: both `curr_node` and `leaf` should be legal node pointers.
                 let lhs = curr_node.cast_to::<NodeLeaf>().unwrap();
                 let rhs = leaf.cast_to::<NodeLeaf>().unwrap();
+                let common_key = lhs.get_common_key(rhs, depth);
+
+                // Inserting the same key again, replace it.
+                if common_key == &key[depth..] {
+                    let old_leaf = curr_node.unbox::<NodeLeaf>();
+                    let old_value = old_leaf.value;
+                    *curr_node = leaf;
+                    return Some(old_value);
+                }
 
                 // make a new inner node with the common parts of two leaves as prefix
-                let common_key = lhs.get_common_key(rhs, depth);
                 depth += common_key.len();
                 let new_header = Header::with_prefix(NodeType::Node4, common_key);
                 let mut new_node = Node4::from_header(new_header);
@@ -725,12 +733,6 @@ mod test {
     }
 
     #[test]
-    #[ignore = "duplicate insertion is not considered now"]
-    fn duplicate_keys() {
-        do_insert_search_drop_test(vec![vec![1, 0], vec![1, 0]]);
-    }
-
-    #[test]
     fn fuzz_case_1() {
         // reason: common length range is mis-calculated when expanding collapsed
         // prefix.
@@ -800,5 +802,32 @@ mod test {
             vec![31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 0],
             vec![38, 0],
         ]);
+    }
+
+    #[test]
+    fn duplicate_keys() {
+        let mut root = NodePtr::default();
+
+        let leaf_1 = NodePtr::boxed(NodeLeaf::new(vec![1, 0], NodePtr::from_usize(1024 + 1)));
+        let leaf_2 = NodePtr::boxed(NodeLeaf::new(vec![1, 0], NodePtr::from_usize(1024 + 3)));
+
+        // first insertion
+        let res = Node::<()>::insert(&mut root, &[1, 0], leaf_1);
+        assert!(res.is_none());
+
+        // duplicate insertion
+        let res = Node::<()>::insert(&mut root, &[1, 0], leaf_2);
+        assert_eq!(res.unwrap(), NodePtr::from_usize(1024 + 1));
+
+        // search
+        let res = Node::<()>::search(&root, &[1, 0]).unwrap();
+        assert_eq!(*res, leaf_2);
+
+        // remove
+        let res = Node::<()>::remove(&mut root, &[1, 0]).unwrap();
+        assert_eq!(res, leaf_2);
+        res.drop::<()>();
+
+        root.drop::<()>();
     }
 }
