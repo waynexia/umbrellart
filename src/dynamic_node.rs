@@ -157,7 +157,6 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
         // direct `transmute`.
         // issue: https://github.com/rust-lang/rust/issues/61956
         let dynamic_node: NotDropDynamicNode<CAPACITY> = unsafe { mem::transmute_copy(&self) };
-        mem::forget(self);
         let NotDropDynamicNode {
             header,
             children,

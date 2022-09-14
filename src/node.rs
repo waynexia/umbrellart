@@ -263,9 +263,9 @@ impl NodePtr {
         unsafe {
             match self.try_as_header().unwrap().node_type() {
                 NodeType::Node4 => Node4::from_node_ptr(self).drop::<V>(),
-                NodeType::Node16 => _ = Node16::from_node_ptr(self).drop::<V>(),
-                NodeType::Node48 => _ = Node48::from_node_ptr(self).drop::<V>(),
-                NodeType::Node256 => _ = Node256::from_node_ptr(self).drop::<V>(),
+                NodeType::Node16 => Node16::from_node_ptr(self).drop::<V>(),
+                NodeType::Node48 => Node48::from_node_ptr(self).drop::<V>(),
+                NodeType::Node256 => Node256::from_node_ptr(self).drop::<V>(),
                 NodeType::Leaf => {
                     let item = NodeLeaf::from_node_ptr(self).value;
                     if item.is_valid_rust_pointer() {
