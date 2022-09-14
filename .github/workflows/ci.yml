@@ -71,10 +71,10 @@ jobs:
           path: |
             ~/.cargo
             ./target
-          key: rust-debug-${{ runner.os }}-${{ hashFiles('rust-toolchain') }}-${{ hashFiles('**/Cargo.lock') }}
+          key: rust-test-${{ runner.os }}-${{ hashFiles('rust-toolchain') }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            rust-debug-${{ runner.os }}-${{ hashFiles('rust-toolchain') }}-
-            rust-debug-${{ runner.os }}-
+            rust-test-${{ runner.os }}-${{ hashFiles('rust-toolchain') }}-
+            rust-test-${{ runner.os }}-
             rust-
       - name: Run Tests
         run: |
@@ -100,10 +100,10 @@ jobs:
           path: |
             ~/.cargo
             ./target
-          key: rust-debug-${{ runner.os }}-${{ hashFiles('rust-toolchain') }}-${{ hashFiles('**/Cargo.lock') }}
+          key: rust-miri-${{ runner.os }}-${{ hashFiles('rust-toolchain') }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            rust-debug-${{ runner.os }}-${{ hashFiles('rust-toolchain') }}-
-            rust-debug-${{ runner.os }}-
+            rust-miri-${{ runner.os }}-${{ hashFiles('rust-toolchain') }}-
+            rust-miri-${{ runner.os }}-
             rust-
       - name: Install miri rust-src
         run: |
@@ -115,3 +115,34 @@ jobs:
         env:
           RUST_BACKTRACE: "1"
           MIRIFLAGS: -Zmiri-backtrace=full
+
+  asan-test:
+    name: asan-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        rust: [nightly-2022-08-03]
+    steps:
+      - uses: actions/checkout@v3
+      - run: |
+          rustup set auto-self-update disable
+          rustup toolchain install ${{ matrix.rust }} --profile minimal
+      - name: Cache Rust Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo
+            ./target
+          key: rust-asan-${{ runner.os }}-${{ hashFiles('rust-toolchain') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-asan-${{ runner.os }}-${{ hashFiles('rust-toolchain') }}-
+            rust-asan-${{ runner.os }}-
+            rust-
+      - name: Miri Tests
+        run: |
+          RUSTFLAGS="-Z sanitizer=address" cargo test --target x86_64-unknown-linux-gnu
+        env:
+          RUST_BACKTRACE: "1"
+          MIRIFLAGS: -Zmiri-backtrace=full
+
