@@ -211,7 +211,7 @@ impl NodePtr {
     #[cfg(test)]
     #[inline]
     pub fn from_usize(ptr: usize) -> Self {
-        Self(ptr as _)
+        Self(ptr::from_exposed_addr_mut(ptr))
     }
 
     #[inline]
@@ -255,18 +255,23 @@ impl NodePtr {
     /// one of the `Node`s will take efforts.
     ///
     /// Because [NodePtr] is [Copy]-able, implement [Drop] is not good.
-    pub fn drop(self) {
+    pub fn drop<V>(self) {
         if !self.is_valid_rust_pointer() {
             return;
         }
 
         unsafe {
             match self.try_as_header().unwrap().node_type() {
-                NodeType::Node4 => _ = Node4::from_node_ptr(self),
-                NodeType::Node16 => _ = Node16::from_node_ptr(self),
-                NodeType::Node48 => _ = Node48::from_node_ptr(self),
-                NodeType::Node256 => _ = Node256::from_node_ptr(self),
-                NodeType::Leaf => _ = NodeLeaf::from_node_ptr(self),
+                NodeType::Node4 => Node4::from_node_ptr(self).drop::<V>(),
+                NodeType::Node16 => _ = Node16::from_node_ptr(self).drop::<V>(),
+                NodeType::Node48 => _ = Node48::from_node_ptr(self).drop::<V>(),
+                NodeType::Node256 => _ = Node256::from_node_ptr(self).drop::<V>(),
+                NodeType::Leaf => {
+                    let item = NodeLeaf::from_node_ptr(self).value;
+                    if item.is_valid_rust_pointer() {
+                        item.unbox::<V>();
+                    }
+                }
             }
         }
     }
@@ -648,14 +653,14 @@ mod test {
             println!("inserting {}", i);
             let leaf_ptr = NodePtr::boxed(NodeLeaf::new(
                 vec![i],
-                NodePtr::from_usize(i as usize * 8 + 1024),
+                NodePtr::from_usize(i as usize * 8 + 1024 + 1),
             ));
             println!("leaf pointer: {:?}", leaf_ptr);
             assert!(Node::<()>::insert(&mut root, &[i], leaf_ptr).is_none());
             println!("root pointer: {:?}", root);
         }
 
-        root.drop();
+        root.drop::<()>();
     }
 
     fn do_insert_search_drop_test(keys: Vec<Vec<u8>>) {
@@ -687,10 +692,10 @@ mod test {
             println!("removing {:?}", key);
             let result = Node::<()>::remove(&mut root, &key).unwrap();
             assert_eq!(result, leaf);
-            result.drop();
+            result.drop::<()>();
         }
 
-        root.drop();
+        root.drop::<()>();
     }
 
     #[test]

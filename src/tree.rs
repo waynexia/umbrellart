@@ -29,9 +29,8 @@ impl<V> Art<V> {
     }
 
     pub fn remove(&mut self, key: &[u8]) -> Option<V> {
-        let leaf = Node::<V>::remove(&mut self.root, key)?;
-        let item = leaf.cast_to::<NodeLeaf>()?.value.unbox::<V>();
-        leaf.drop();
+        let leaf = Node::<V>::remove(&mut self.root, key)?.unbox::<NodeLeaf>();
+        let item = leaf.value.unbox::<V>();
 
         Some(item)
     }
@@ -45,7 +44,7 @@ impl<V> Default for Art<V> {
 
 impl<V> Drop for Art<V> {
     fn drop(&mut self) {
-        self.root.drop();
+        self.root.drop::<V>();
     }
 }
 

@@ -166,13 +166,11 @@ impl<const CAPACITY: usize, const TYPE: u8> DynamicNode<CAPACITY, TYPE> {
 
         (header, children, keys)
     }
-}
 
-impl<const CAPACITY: usize, const TYPE: u8> Drop for DynamicNode<CAPACITY, TYPE> {
-    fn drop(&mut self) {
+    pub fn drop<V>(self) {
         for child in self.children {
             if !child.is_null() {
-                child.drop();
+                child.drop::<V>();
             }
         }
     }
@@ -296,6 +294,8 @@ mod test {
         assert!(node.remove_child(9).is_some());
         assert!(node.remove_child(9).is_none());
         assert!(node.find_key(9).is_none());
+
+        node.drop::<()>();
     }
 
     fn do_overflow<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
@@ -306,6 +306,8 @@ mod test {
         }
 
         node.add_child(10, NodePtr::from_usize(1));
+
+        node.drop::<()>();
     }
 
     fn do_erases<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
@@ -315,6 +317,8 @@ mod test {
             node.add_child(i, NodePtr::from_usize(1));
             assert!(node.remove_child(i).is_some());
         }
+
+        node.drop::<()>();
     }
 
     fn do_insert_duplicate<const CAP: usize, const TYPE: u8>(_node: DynamicNode<CAP, TYPE>) {
@@ -339,6 +343,8 @@ mod test {
             NodePtr::from_usize(201)
         );
         assert_eq!(*node.find_key(2).unwrap(), NodePtr::from_usize(2001));
+
+        node.drop::<()>();
     }
 
     #[test]
@@ -392,6 +398,8 @@ mod test {
         }
 
         assert!(node.should_grow());
+
+        node.drop::<()>();
     }
 
     #[test]
@@ -403,6 +411,8 @@ mod test {
         }
 
         assert!(node.should_grow());
+
+        node.drop::<()>();
     }
 
     #[test]
@@ -423,6 +433,8 @@ mod test {
         for i in Node4::CAPACITY..=u8::MAX as usize {
             assert!(node16.find_key(i as u8).is_none());
         }
+
+        node16.drop::<()>();
     }
 
     #[test]
@@ -446,6 +458,8 @@ mod test {
         for i in Node16::CAPACITY..=u8::MAX as usize {
             assert!(node48.find_key(i as u8).is_none());
         }
+
+        node48.drop::<()>();
     }
 
     #[test]
@@ -476,6 +490,8 @@ mod test {
                 assert!(node4.find_key(i as u8).is_none());
             }
         }
+
+        node4.drop::<()>();
     }
 
     #[test]
@@ -484,11 +500,11 @@ mod test {
         for i in 0..4 {
             let leaf_ptr = NodePtr::boxed(NodeLeaf::new(
                 vec![i],
-                NodePtr::from_usize(i as usize * 8 + 1024),
+                NodePtr::from_usize(i as usize * 8 + 1024 + 1),
             ));
             node4.add_child(i, leaf_ptr);
         }
-        drop(node4);
+        node4.drop::<()>();
     }
 
     #[test]
@@ -497,10 +513,10 @@ mod test {
         for i in 0..4 {
             let leaf_ptr = NodePtr::boxed(NodeLeaf::new(
                 vec![i],
-                NodePtr::from_usize(i as usize * 8 + 1024),
+                NodePtr::from_usize(i as usize * 8 + 1024 + 1),
             ));
             node16.add_child(i, leaf_ptr);
         }
-        drop(node16);
+        node16.drop::<()>();
     }
 }

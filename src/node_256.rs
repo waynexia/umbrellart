@@ -132,13 +132,11 @@ impl Node256 {
 
         (header, children)
     }
-}
 
-impl Drop for Node256 {
-    fn drop(&mut self) {
+    pub fn drop<V>(self) {
         for ptr in self.children {
             if !ptr.is_null() {
-                ptr.drop();
+                ptr.drop::<V>();
             }
         }
     }
@@ -163,6 +161,8 @@ mod test {
         assert!(node.remove_child(u8::MAX - 1).is_none());
         assert_eq!(node.remove_child(u8::MAX).unwrap(), NodePtr::from_usize(1));
         assert!(node.find_key(u8::MAX).is_none());
+
+        node.drop::<()>();
     }
 
     #[test]
@@ -188,6 +188,8 @@ mod test {
             NodePtr::from_usize(201)
         );
         assert_eq!(*node.find_key(2).unwrap(), NodePtr::from_usize(2001));
+
+        node.drop::<()>();
     }
 
     #[test]
@@ -213,6 +215,7 @@ mod test {
         for i in Node48::CAPACITY..=u8::MAX as usize {
             assert!(node48.find_key(i as u8).is_none());
         }
+        node48.drop::<()>();
     }
 
     #[test]
@@ -225,6 +228,6 @@ mod test {
             ));
             node256.add_child(i, leaf_ptr);
         }
-        drop(node256);
+        node256.drop::<()>();
     }
 }
