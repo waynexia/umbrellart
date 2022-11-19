@@ -156,9 +156,9 @@ impl Node48 {
         header.reset_count();
         let mut node256 = Node256::from_header(header);
 
-        for (key, child) in keys.into_iter().zip(children.into_iter()) {
+        for (index, key) in keys.into_iter().enumerate() {
             if key != Self::NULL_INDEX {
-                node256.add_child(key, child);
+                node256.add_child(index as u8, children[key as usize]);
             }
         }
 
