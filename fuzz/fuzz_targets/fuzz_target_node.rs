@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 
 use fuzz_common::NodeOperation;
-use libfuzzer_sys::fuzz_target;
+use libfuzzer_sys::{fuzz_target, Corpus};
 use umbrellart::Art;
 
 fn convert_key(key: Vec<u8>) -> Vec<u8> {
@@ -12,7 +12,7 @@ fn convert_key(key: Vec<u8>) -> Vec<u8> {
 }
 
 // Only test insert & search.
-fuzz_target!(|operations: Vec<NodeOperation>| {
+fuzz_target!(|operations: Vec<NodeOperation>| -> Corpus {
     let mut art = Art::new();
     let mut answers = HashMap::new();
 
@@ -21,13 +21,14 @@ fuzz_target!(|operations: Vec<NodeOperation>| {
             NodeOperation::Insert { key, value } => {
                 let key = convert_key(key);
                 if key.len() <= 1 {
-                    continue;
+                    // return Corpus::Reject;
+                    return Corpus::Keep;
                 }
 
-                if answers.contains_key(&key) {
-                    // todo: ignore duplicate keys for now.
-                    continue;
-                }
+                // if answers.contains_key(&key) {
+                //     // todo: ignore duplicate keys for now.
+                //     continue;
+                // }
                 let answer = answers.insert(key.clone(), value);
                 let result = art.insert(&key, value);
                 assert_eq!(answer, result);
@@ -42,7 +43,8 @@ fuzz_target!(|operations: Vec<NodeOperation>| {
                     convert_key(key)
                 };
                 if key.len() <= 1 {
-                    continue;
+                    // return Corpus::Reject;
+                    return Corpus::Keep;
                 }
 
                 let answer = answers.remove(&key);
@@ -56,4 +58,6 @@ fuzz_target!(|operations: Vec<NodeOperation>| {
         let result = art.get(&k).unwrap();
         assert_eq!(*result, answer);
     }
+
+    Corpus::Keep
 });
