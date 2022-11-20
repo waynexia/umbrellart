@@ -8,3 +8,10 @@ edition = "2021"
 
 [dev-dependencies]
 env_logger = "0.7"
+criterion = "0.3"
+unkai = { git = "https://github.com/waynexia/unkai.git" }
+rand = "0.8.5"
+
+[[bench]]
+name = "point_read_umbrellart"
+harness = false
